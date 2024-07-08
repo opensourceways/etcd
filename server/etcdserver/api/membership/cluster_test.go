@@ -20,15 +20,19 @@ import (
 	"path"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/coreos/go-semver/semver"
 	"github.com/stretchr/testify/assert"
+	betesting "go.etcd.io/etcd/server/v3/mvcc/backend/testing"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/client/pkg/v3/types"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v2store"
 	"go.etcd.io/etcd/server/v3/mock/mockstore"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 func TestClusterMember(t *testing.T) {
@@ -240,7 +244,7 @@ func TestClusterValidateAndAssignIDsBad(t *testing.T) {
 	for i, tt := range tests {
 		ecl := newTestCluster(t, tt.clmembs)
 		lcl := newTestCluster(t, tt.membs)
-		if err := ValidateClusterAndAssignIDs(zaptest.NewLogger(t), lcl, ecl); err == nil {
+		if err := ValidateClusterAndAssignIDs(zap.NewExample(), lcl, ecl); err == nil {
 			t.Errorf("#%d: unexpected update success", i)
 		}
 	}
@@ -267,7 +271,7 @@ func TestClusterValidateAndAssignIDs(t *testing.T) {
 	for i, tt := range tests {
 		lcl := newTestCluster(t, tt.clmembs)
 		ecl := newTestCluster(t, tt.membs)
-		if err := ValidateClusterAndAssignIDs(zaptest.NewLogger(t), lcl, ecl); err != nil {
+		if err := ValidateClusterAndAssignIDs(zap.NewExample(), lcl, ecl); err != nil {
 			t.Errorf("#%d: unexpect update error: %v", i, err)
 		}
 		if !reflect.DeepEqual(lcl.MemberIDs(), tt.wids) {
@@ -276,17 +280,11 @@ func TestClusterValidateAndAssignIDs(t *testing.T) {
 	}
 }
 
-func TestClusterValidateConfigurationChangeV2(t *testing.T) {
-	cl := NewCluster(zaptest.NewLogger(t), WithMaxLearners(1))
-	be := newMembershipBackend()
-	cl.SetBackend(be)
+func TestClusterValidateConfigurationChange(t *testing.T) {
+	cl := NewCluster(zaptest.NewLogger(t))
 	cl.SetStore(v2store.New())
 	for i := 1; i <= 4; i++ {
-		var isLearner bool
-		if i == 1 {
-			isLearner = true
-		}
-		attr := RaftAttributes{PeerURLs: []string{fmt.Sprintf("http://127.0.0.1:%d", i)}, IsLearner: isLearner}
+		attr := RaftAttributes{PeerURLs: []string{fmt.Sprintf("http://127.0.0.1:%d", i)}}
 		cl.AddMember(&Member{ID: types.ID(i), RaftAttributes: attr}, true)
 	}
 	cl.RemoveMember(4, true)
@@ -331,17 +329,6 @@ func TestClusterValidateConfigurationChangeV2(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	attr = RaftAttributes{PeerURLs: []string{fmt.Sprintf("http://127.0.0.1:%d", 7)}, IsLearner: true}
-	ctx7, err := json.Marshal(&ConfigChangeContext{Member: Member{ID: types.ID(7), RaftAttributes: attr}})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	attr = RaftAttributes{PeerURLs: []string{fmt.Sprintf("http://127.0.0.1:%d", 1)}, IsLearner: true}
-	ctx8, err := json.Marshal(&ConfigChangeContext{Member: Member{ID: types.ID(1), RaftAttributes: attr}, IsPromote: true})
-	if err != nil {
-		t.Fatal(err)
-	}
 	tests := []struct {
 		cc   raftpb.ConfChange
 		werr error
@@ -439,22 +426,6 @@ func TestClusterValidateConfigurationChangeV2(t *testing.T) {
 			},
 			ErrIDNotFound,
 		},
-		{
-			raftpb.ConfChange{
-				Type:    raftpb.ConfChangeAddLearnerNode,
-				NodeID:  7,
-				Context: ctx7,
-			},
-			ErrTooManyLearners,
-		},
-		{
-			raftpb.ConfChange{
-				Type:    raftpb.ConfChangeAddNode,
-				NodeID:  1,
-				Context: ctx8,
-			},
-			nil,
-		},
 	}
 	for i, tt := range tests {
 		err := cl.ValidateConfigurationChange(tt.cc)
@@ -469,9 +440,6 @@ func TestClusterGenID(t *testing.T) {
 		newTestMember(1, nil, "", nil),
 		newTestMember(2, nil, "", nil),
 	})
-
-	be := newMembershipBackend()
-	cs.SetBackend(be)
 
 	cs.genID()
 	if cs.ID() == 0 {
@@ -513,7 +481,7 @@ func TestNodeToMemberBad(t *testing.T) {
 		}},
 	}
 	for i, tt := range tests {
-		if _, err := nodeToMember(zaptest.NewLogger(t), tt); err == nil {
+		if _, err := nodeToMember(zap.NewExample(), tt); err == nil {
 			t.Errorf("#%d: unexpected nil error", i)
 		}
 	}
@@ -528,7 +496,7 @@ func TestClusterAddMember(t *testing.T) {
 	wactions := []testutil.Action{
 		{
 			Name: "Create",
-			Params: []any{
+			Params: []interface{}{
 				path.Join(StoreMembersPrefix, "1", "raftAttributes"),
 				false,
 				`{"peerURLs":null}`,
@@ -546,15 +514,15 @@ func TestClusterAddMemberAsLearner(t *testing.T) {
 	st := mockstore.NewRecorder()
 	c := newTestCluster(t, nil)
 	c.SetStore(st)
-	c.AddMember(newTestMemberAsLearner(1, []string{}, "node1", []string{"http://node1"}), true)
+	c.AddMember(newTestMemberAsLearner(1, nil, "node1", nil), true)
 
 	wactions := []testutil.Action{
 		{
 			Name: "Create",
-			Params: []any{
+			Params: []interface{}{
 				path.Join(StoreMembersPrefix, "1", "raftAttributes"),
 				false,
-				`{"peerURLs":[],"isLearner":true}`,
+				`{"peerURLs":null,"isLearner":true}`,
 				false,
 				v2store.TTLOptionSet{ExpireTime: v2store.Permanent},
 			},
@@ -592,8 +560,8 @@ func TestClusterRemoveMember(t *testing.T) {
 	c.RemoveMember(1, true)
 
 	wactions := []testutil.Action{
-		{Name: "Delete", Params: []any{MemberStoreKey(1), true, true}},
-		{Name: "Create", Params: []any{RemovedMemberStoreKey(1), false, "", false, v2store.TTLOptionSet{ExpireTime: v2store.Permanent}}},
+		{Name: "Delete", Params: []interface{}{MemberStoreKey(1), true, true}},
+		{Name: "Create", Params: []interface{}{RemovedMemberStoreKey(1), false, "", false, v2store.TTLOptionSet{ExpireTime: v2store.Permanent}}},
 	}
 	if !reflect.DeepEqual(st.Action(), wactions) {
 		t.Errorf("actions = %v, want %v", st.Action(), wactions)
@@ -642,7 +610,7 @@ func TestNodeToMember(t *testing.T) {
 		{Key: "/1234/raftAttributes", Value: stringp(`{"peerURLs":null}`)},
 	}}
 	wm := &Member{ID: 0x1234, RaftAttributes: RaftAttributes{}, Attributes: Attributes{Name: "node1"}}
-	m, err := nodeToMember(zaptest.NewLogger(t), n)
+	m, err := nodeToMember(zap.NewExample(), n)
 	if err != nil {
 		t.Fatalf("unexpected nodeToMember error: %v", err)
 	}
@@ -982,68 +950,264 @@ func TestIsReadyToPromoteMember(t *testing.T) {
 	}
 }
 
-func TestClusterStore(t *testing.T) {
-	name := "etcd"
-	clientURLs := []string{"http://127.0.0.1:4001"}
+func TestIsVersionChangable(t *testing.T) {
+	v0 := semver.Must(semver.NewVersion("2.4.0"))
+	v1 := semver.Must(semver.NewVersion("3.4.0"))
+	v2 := semver.Must(semver.NewVersion("3.5.0"))
+	v3 := semver.Must(semver.NewVersion("3.5.1"))
+	v4 := semver.Must(semver.NewVersion("3.6.0"))
 
 	tests := []struct {
-		name    string
-		mems    []*Member
-		removed map[types.ID]bool
+		name           string
+		currentVersion *semver.Version
+		localVersion   *semver.Version
+		expectedResult bool
 	}{
 		{
-			name: "Single member, no removed members",
-			mems: []*Member{
-				newTestMember(1, nil, name, clientURLs),
-			},
-			removed: map[types.ID]bool{},
+			name:           "When local version is one minor lower than cluster version",
+			currentVersion: v2,
+			localVersion:   v1,
+			expectedResult: true,
 		},
 		{
-			name: "Multiple members, no removed members",
-			mems: []*Member{
-				newTestMember(1, nil, name, clientURLs),
-				newTestMember(2, nil, name, clientURLs),
-				newTestMember(3, nil, name, clientURLs),
-			},
-			removed: map[types.ID]bool{},
+			name:           "When local version is one minor and one patch lower than cluster version",
+			currentVersion: v3,
+			localVersion:   v1,
+			expectedResult: true,
 		},
 		{
-			name: "Single member, one removed member",
-			mems: []*Member{
-				newTestMember(1, nil, name, clientURLs),
-			},
-			removed: map[types.ID]bool{types.ID(2): true},
+			name:           "When local version is one minor higher than cluster version",
+			currentVersion: v1,
+			localVersion:   v2,
+			expectedResult: true,
 		},
 		{
-			name: "Multiple members, some removed members",
-			mems: []*Member{
-				newTestMember(1, nil, name, clientURLs),
-				newTestMember(2, nil, name, clientURLs),
-				newTestMember(3, nil, name, clientURLs),
-			},
-			removed: map[types.ID]bool{
-				types.ID(4): true,
-				types.ID(5): true,
-			},
+			name:           "When local version is two minor higher than cluster version",
+			currentVersion: v1,
+			localVersion:   v4,
+			expectedResult: true,
+		},
+		{
+			name:           "When local version is one major higher than cluster version",
+			currentVersion: v0,
+			localVersion:   v1,
+			expectedResult: false,
+		},
+		{
+			name:           "When local version is equal to cluster version",
+			currentVersion: v1,
+			localVersion:   v1,
+			expectedResult: false,
+		},
+		{
+			name:           "When local version is one patch higher than cluster version",
+			currentVersion: v2,
+			localVersion:   v3,
+			expectedResult: false,
+		},
+		{
+			name:           "When local version is two minor lower than cluster version",
+			currentVersion: v4,
+			localVersion:   v1,
+			expectedResult: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := newTestCluster(t, tt.mems)
-			c.removed = tt.removed
-
-			st := v2store.New("/0", "/1")
-			c.Store(st)
-
-			// Verify that the members are properly stored
-			mst, rst := membersFromStore(c.lg, st)
-			for _, mem := range tt.mems {
-				assert.Equal(t, mem, mst[mem.ID])
+			if ret := IsValidVersionChange(tt.currentVersion, tt.localVersion); ret != tt.expectedResult {
+				t.Errorf("Expected %v; Got %v", tt.expectedResult, ret)
 			}
+		})
+	}
+}
 
-			// Verify that removed members are correctly stored
-			assert.Equal(t, tt.removed, rst)
+func TestAddMemberSyncsBackendAndStoreV2(t *testing.T) {
+	now := time.Now()
+	alice := NewMember("", nil, "alice", &now)
+
+	tcs := []struct {
+		name string
+
+		storeV2Nil     bool
+		backendNil     bool
+		storeV2Members []*Member
+		backendMembers []*Member
+
+		expectPanics  bool
+		expectMembers map[types.ID]*Member
+	}{
+		{
+			name: "Adding new member should succeed",
+		},
+		{
+			name:           "Adding member should succeed if it was only in storeV2",
+			storeV2Members: []*Member{alice},
+		},
+		{
+			name:           "Adding member should succeed if it was only in backend",
+			backendMembers: []*Member{alice},
+		},
+		{
+			name:           "Adding member should fail if it exists in both",
+			storeV2Members: []*Member{alice},
+			backendMembers: []*Member{alice},
+			expectPanics:   true,
+		},
+		{
+			name:           "Adding member should fail if it exists in storeV2 and backend is nil",
+			storeV2Members: []*Member{alice},
+			backendNil:     true,
+			expectPanics:   true,
+		},
+		{
+			name:           "Adding member should succeed if it exists in backend and storageV2 is nil",
+			storeV2Nil:     true,
+			backendMembers: []*Member{alice},
+		},
+		{
+			name:           "Adding new member should succeed if backend is nil",
+			storeV2Members: []*Member{},
+			backendNil:     true,
+		},
+		{
+			name:           "Adding new member should fail if storageV2 is nil",
+			storeV2Nil:     true,
+			backendMembers: []*Member{},
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			lg := zaptest.NewLogger(t)
+			be, _ := betesting.NewDefaultTmpBackend(t)
+			defer be.Close()
+			mustCreateBackendBuckets(be)
+			st := v2store.New()
+			for _, m := range tc.backendMembers {
+				unsafeSaveMemberToBackend(lg, be, m)
+			}
+			be.ForceCommit()
+			for _, m := range tc.storeV2Members {
+				mustSaveMemberToStore(lg, st, m)
+			}
+			cluster := NewCluster(lg)
+			if !tc.backendNil {
+				cluster.SetBackend(be)
+			}
+			if !tc.storeV2Nil {
+				cluster.SetStore(st)
+			}
+			if tc.expectPanics {
+				assert.Panics(t, func() {
+					cluster.AddMember(alice, ApplyBoth)
+				})
+			} else {
+				cluster.AddMember(alice, ApplyBoth)
+			}
+			if !tc.storeV2Nil {
+				storeV2Members, _ := membersFromStore(lg, st)
+				assert.Equal(t, map[types.ID]*Member{alice.ID: alice}, storeV2Members)
+			}
+			if !tc.backendNil {
+				be.ForceCommit()
+				beMembers, _ := mustReadMembersFromBackend(lg, be)
+				assert.Equal(t, map[types.ID]*Member{alice.ID: alice}, beMembers)
+			}
+		})
+	}
+}
+
+func TestRemoveMemberSyncsBackendAndStoreV2(t *testing.T) {
+	now := time.Now()
+	alice := NewMember("", nil, "alice", &now)
+
+	tcs := []struct {
+		name string
+
+		storeV2Nil     bool
+		backendNil     bool
+		storeV2Members []*Member
+		backendMembers []*Member
+
+		expectMembers []*Member
+		expectPanics  bool
+	}{
+		{
+			name:         "Removing new member should fail",
+			expectPanics: true,
+		},
+		{
+			name:           "Removing member should succeed if it was only in storeV2",
+			storeV2Members: []*Member{alice},
+		},
+		{
+			name:           "Removing member should succeed if it was only in backend",
+			backendMembers: []*Member{alice},
+		},
+		{
+			name:           "Removing member should succeed if it exists in both",
+			storeV2Members: []*Member{alice},
+			backendMembers: []*Member{alice},
+		},
+		{
+			name:           "Removing new member should fail if backend is nil",
+			storeV2Members: []*Member{},
+			backendNil:     true,
+			expectPanics:   true,
+		},
+		{
+			name:           "Removing new member should succeed if storageV2 is nil",
+			storeV2Nil:     true,
+			backendMembers: []*Member{},
+		},
+		{
+			name:           "Removing member should succeed if it exists in v2storage and backend is nil",
+			storeV2Members: []*Member{alice},
+			backendNil:     true,
+		},
+		{
+			name:           "Removing member should succeed if it exists in backend and storageV2 is nil",
+			storeV2Nil:     true,
+			backendMembers: []*Member{alice},
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			lg := zaptest.NewLogger(t)
+			be, _ := betesting.NewDefaultTmpBackend(t)
+			defer be.Close()
+			mustCreateBackendBuckets(be)
+			st := v2store.New()
+			for _, m := range tc.backendMembers {
+				unsafeSaveMemberToBackend(lg, be, m)
+			}
+			be.ForceCommit()
+			for _, m := range tc.storeV2Members {
+				mustSaveMemberToStore(lg, st, m)
+			}
+			cluster := NewCluster(lg)
+			if !tc.backendNil {
+				cluster.SetBackend(be)
+			}
+			if !tc.storeV2Nil {
+				cluster.SetStore(st)
+			}
+			if tc.expectPanics {
+				assert.Panics(t, func() {
+					cluster.RemoveMember(alice.ID, ApplyBoth)
+				})
+			} else {
+				cluster.RemoveMember(alice.ID, ApplyBoth)
+			}
+			if !tc.storeV2Nil {
+				storeV2Members, _ := membersFromStore(lg, st)
+				assert.Equal(t, map[types.ID]*Member{}, storeV2Members)
+			}
+			if !tc.backendNil {
+				be.ForceCommit()
+				beMembers, _ := mustReadMembersFromBackend(lg, be)
+				assert.Equal(t, map[types.ID]*Member{}, beMembers)
+			}
 		})
 	}
 }

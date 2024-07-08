@@ -1,17 +1,3 @@
-// Copyright 2022 The etcd Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package etcdhttp
 
 import (
@@ -26,15 +12,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap/zaptest"
 
-	"go.etcd.io/raft/v3"
-
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/client/pkg/v3/types"
+	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/server/v3/auth"
 	"go.etcd.io/etcd/server/v3/config"
-	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
-	"go.etcd.io/etcd/server/v3/storage/schema"
+	betesting "go.etcd.io/etcd/server/v3/mvcc/backend/testing"
 )
 
 type fakeHealthServer struct {
@@ -156,16 +140,16 @@ func TestHealthHandler(t *testing.T) {
 				serializableReadError: tt.apiError,
 				linearizableReadError: tt.apiError,
 				missingLeader:         tt.missingLeader,
-				authStore:             auth.NewAuthStore(lg, schema.NewAuthBackend(lg, be), nil, 0),
+				authStore:             auth.NewAuthStore(lg, be, nil, 0),
 			})
 			ts := httptest.NewServer(mux)
 			defer ts.Close()
-			checkHTTPResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, nil, nil)
+			checkHttpResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, nil, nil)
 		})
 	}
 }
 
-func TestHTTPSubPath(t *testing.T) {
+func TestHttpSubPath(t *testing.T) {
 	be, _ := betesting.NewDefaultTmpBackend(t)
 	defer betesting.Close(t, be)
 	tests := []healthTestCase{
@@ -193,12 +177,12 @@ func TestHTTPSubPath(t *testing.T) {
 			logger := zaptest.NewLogger(t)
 			s := &fakeHealthServer{
 				serializableReadError: tt.apiError,
-				authStore:             auth.NewAuthStore(logger, schema.NewAuthBackend(logger, be), nil, 0),
+				authStore:             auth.NewAuthStore(logger, be, nil, 0),
 			}
 			HandleHealth(logger, mux, s)
 			ts := httptest.NewServer(mux)
 			defer ts.Close()
-			checkHTTPResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
+			checkHttpResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
 			checkMetrics(t, tt.healthCheckURL, "", tt.expectStatusCode)
 		})
 	}
@@ -247,16 +231,16 @@ func TestDataCorruptionCheck(t *testing.T) {
 			mux := http.NewServeMux()
 			logger := zaptest.NewLogger(t)
 			s := &fakeHealthServer{
-				authStore: auth.NewAuthStore(logger, schema.NewAuthBackend(logger, be), nil, 0),
+				authStore: auth.NewAuthStore(logger, be, nil, 0),
 			}
 			HandleHealth(logger, mux, s)
 			ts := httptest.NewServer(mux)
 			defer ts.Close()
 			// OK before alarms are activated.
-			checkHTTPResponse(t, ts, tt.healthCheckURL, http.StatusOK, nil, nil)
+			checkHttpResponse(t, ts, tt.healthCheckURL, http.StatusOK, nil, nil)
 			// Activate the alarms.
 			s.alarms = tt.alarms
-			checkHTTPResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
+			checkHttpResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
 		})
 	}
 }
@@ -292,12 +276,12 @@ func TestSerializableReadCheck(t *testing.T) {
 			logger := zaptest.NewLogger(t)
 			s := &fakeHealthServer{
 				serializableReadError: tt.apiError,
-				authStore:             auth.NewAuthStore(logger, schema.NewAuthBackend(logger, be), nil, 0),
+				authStore:             auth.NewAuthStore(logger, be, nil, 0),
 			}
 			HandleHealth(logger, mux, s)
 			ts := httptest.NewServer(mux)
 			defer ts.Close()
-			checkHTTPResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
+			checkHttpResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
 			checkMetrics(t, tt.healthCheckURL, "serializable_read", tt.expectStatusCode)
 		})
 	}
@@ -333,18 +317,18 @@ func TestLinearizableReadCheck(t *testing.T) {
 			logger := zaptest.NewLogger(t)
 			s := &fakeHealthServer{
 				linearizableReadError: tt.apiError,
-				authStore:             auth.NewAuthStore(logger, schema.NewAuthBackend(logger, be), nil, 0),
+				authStore:             auth.NewAuthStore(logger, be, nil, 0),
 			}
 			HandleHealth(logger, mux, s)
 			ts := httptest.NewServer(mux)
 			defer ts.Close()
-			checkHTTPResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
+			checkHttpResponse(t, ts, tt.healthCheckURL, tt.expectStatusCode, tt.inResult, tt.notInResult)
 			checkMetrics(t, tt.healthCheckURL, "linearizable_read", tt.expectStatusCode)
 		})
 	}
 }
 
-func checkHTTPResponse(t *testing.T, ts *httptest.Server, url string, expectStatusCode int, inResult []string, notInResult []string) {
+func checkHttpResponse(t *testing.T, ts *httptest.Server, url string, expectStatusCode int, inResult []string, notInResult []string) {
 	res, err := ts.Client().Do(&http.Request{Method: http.MethodGet, URL: testutil.MustNewURL(t, ts.URL+url)})
 
 	if err != nil {

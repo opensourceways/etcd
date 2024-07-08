@@ -20,8 +20,7 @@ import (
 	"strconv"
 
 	"github.com/spf13/cobra"
-
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 )
 
@@ -102,7 +101,7 @@ func getPutOp(args []string) (string, string, []clientv3.OpOption) {
 		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad lease ID (%v), expecting ID in Hex", err))
 	}
 
-	var opts []clientv3.OpOption
+	opts := []clientv3.OpOption{}
 	if id != 0 {
 		opts = append(opts, clientv3.WithLease(clientv3.LeaseID(id)))
 	}

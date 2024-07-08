@@ -22,29 +22,24 @@ import (
 	"strings"
 	"time"
 
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.uber.org/zap"
-
-	bolt "go.etcd.io/bbolt"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.etcd.io/etcd/client/pkg/v3/types"
-	"go.etcd.io/etcd/pkg/v3/featuregate"
 	"go.etcd.io/etcd/pkg/v3/netutil"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v3discovery"
-	"go.etcd.io/etcd/server/v3/storage/datadir"
+	"go.etcd.io/etcd/server/v3/datadir"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+
+	bolt "go.etcd.io/bbolt"
+	"go.uber.org/zap"
 )
 
 // ServerConfig holds the configuration of etcd as taken from the command line or discovery.
 type ServerConfig struct {
-	Name string
-
+	Name           string
 	DiscoveryURL   string
 	DiscoveryProxy string
-	DiscoveryCfg   v3discovery.DiscoveryConfig
-
-	ClientURLs types.URLs
-	PeerURLs   types.URLs
-	DataDir    string
+	ClientURLs     types.URLs
+	PeerURLs       types.URLs
+	DataDir        string
 	// DedicatedWALDir config will make the etcd to write the WAL to the WALDir
 	// rather than the dataDir/member/wal.
 	DedicatedWALDir string
@@ -56,6 +51,7 @@ type ServerConfig struct {
 	// We expect the follower has a millisecond level latency with the leader.
 	// The max throughput is around 10K. Keep a 5K entries is enough for helping
 	// follower to catch up.
+	// WARNING: only change this for tests. Always use "DefaultSnapshotCatchUpEntries"
 	SnapshotCatchUpEntries uint64
 
 	MaxSnapFiles uint
@@ -118,7 +114,6 @@ type ServerConfig struct {
 	AutoCompactionRetention time.Duration
 	AutoCompactionMode      string
 	CompactionBatchLimit    int
-	CompactionSleepInterval time.Duration
 	QuotaBackendBytes       int64
 	MaxTxnOps               uint
 
@@ -129,8 +124,7 @@ type ServerConfig struct {
 	// streams that each client can open at a time.
 	MaxConcurrentStreams uint32
 
-	WarningApplyDuration        time.Duration
-	WarningUnaryRequestDuration time.Duration
+	WarningApplyDuration time.Duration
 
 	StrictReconfigCheck bool
 
@@ -200,17 +194,8 @@ type ServerConfig struct {
 	// consider running defrag during bootstrap. Needs to be set to non-zero value to take effect.
 	ExperimentalBootstrapDefragThresholdMegabytes uint `json:"experimental-bootstrap-defrag-threshold-megabytes"`
 
-	// ExperimentalMaxLearners sets a limit to the number of learner members that can exist in the cluster membership.
-	ExperimentalMaxLearners int `json:"experimental-max-learners"`
-
 	// V2Deprecation defines a phase of v2store deprecation process.
 	V2Deprecation V2DeprecationEnum `json:"v2-deprecation"`
-
-	// ExperimentalLocalAddress is the local IP address to use when communicating with a peer.
-	ExperimentalLocalAddress string `json:"experimental-local-address"`
-
-	// ServerFeatureGate is a server level feature gate
-	ServerFeatureGate featuregate.FeatureGate
 }
 
 // VerifyBootstrap sanity-checks the initial config for bootstrap case
@@ -276,7 +261,7 @@ func (c *ServerConfig) advertiseMatchesCluster() error {
 		initMap[url.String()] = struct{}{}
 	}
 
-	var missing []string
+	missing := []string{}
 	for url := range initMap {
 		if _, ok := apMap[url]; !ok {
 			missing = append(missing, url)
@@ -314,14 +299,12 @@ func (c *ServerConfig) WALDir() string {
 	if c.DedicatedWALDir != "" {
 		return c.DedicatedWALDir
 	}
-	return datadir.ToWALDir(c.DataDir)
+	return datadir.ToWalDir(c.DataDir)
 }
 
 func (c *ServerConfig) SnapDir() string { return filepath.Join(c.MemberDir(), "snap") }
 
-func (c *ServerConfig) ShouldDiscover() bool {
-	return c.DiscoveryURL != "" || len(c.DiscoveryCfg.Endpoints) > 0
-}
+func (c *ServerConfig) ShouldDiscover() bool { return c.DiscoveryURL != "" }
 
 // ReqTimeout returns timeout for request to finish.
 func (c *ServerConfig) ReqTimeout() time.Duration {

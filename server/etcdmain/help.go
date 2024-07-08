@@ -1,5 +1,4 @@
 // Copyright 2015 The etcd Authors
-// Copyright 2015 The etcd Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,11 +18,10 @@ import (
 	"fmt"
 	"strconv"
 
-	"golang.org/x/crypto/bcrypt"
-
 	cconfig "go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
+	"golang.org/x/crypto/bcrypt"
 )
 
 var (
@@ -55,7 +53,7 @@ Member:
     Path to the data directory.
   --wal-dir ''
     Path to the dedicated wal directory.
-  --snapshot-count '10000'
+  --snapshot-count '100000'
     Number of committed transactions to trigger a snapshot to disk.
   --heartbeat-interval '100'
     Time (in milliseconds) of a heartbeat interval.
@@ -87,6 +85,8 @@ Member:
     Maximum client request size in bytes the server will accept.
   --max-concurrent-streams 'math.MaxUint32'
     Maximum concurrent streams that each client can open at a time.
+  --enable-grpc-gateway
+    Enable GRPC gateway.
   --grpc-keepalive-min-time '5s'
     Minimum duration interval that a client should wait before pinging server.
   --grpc-keepalive-interval '2h'
@@ -97,8 +97,6 @@ Member:
     Enable to set socket option SO_REUSEPORT on listeners allowing rebinding of a port already in use.
   --socket-reuse-address 'false'
     Enable to set socket option SO_REUSEADDR on listeners allowing binding to an address in TIME_WAIT state.
-  --enable-grpc-gateway
-    Enable GRPC gateway.
   --raft-read-timeout '` + rafthttp.DefaultConnReadTimeout.String() + `'
     Read timeout set on each rafthttp connection
   --raft-write-timeout '` + rafthttp.DefaultConnWriteTimeout.String() + `'
@@ -107,13 +105,11 @@ Member:
 Clustering:
   --initial-advertise-peer-urls 'http://localhost:2380'
     List of this member's peer URLs to advertise to the rest of the cluster.
-  --experimental-set-member-localaddr 'false'
-    Enable using the first specified and non-loopback local address from initial-advertise-peer-urls as the local address when communicating with a peer.
   --initial-cluster 'default=http://localhost:2380'
     Initial cluster configuration for bootstrapping.
   --initial-cluster-state 'new'
     Initial cluster state ('new' when bootstrapping a new cluster or 'existing' when adding new members to an existing cluster).
-    After successful initialization (bootstrapping or adding), flag is ignored on restarts
+    After successful initialization (bootstrapping or adding), flag is ignored on restarts.
   --initial-cluster-token 'etcd-cluster'
     Initial cluster token for the etcd cluster during bootstrap.
     Specifying this can protect you from unintended cross-cluster interaction when running multiple clusters.
@@ -121,37 +117,12 @@ Clustering:
     List of this member's client URLs to advertise to the public.
     The client URLs advertised should be accessible to machines that talk to etcd cluster. etcd client libraries parse these URLs to connect to the cluster.
   --discovery ''
-    Discovery URL used to bootstrap the cluster for v2 discovery. Will be deprecated in v3.7, and be decommissioned in v3.8.
-  --discovery-token ''
-    V3 discovery: discovery token for the etcd cluster to be bootstrapped.
-  --discovery-endpoints ''
-    V3 discovery: List of gRPC endpoints of the discovery service.
-  --discovery-dial-timeout '2s'
-    V3 discovery: dial timeout for client connections.
-  --discovery-request-timeout '5s'
-    V3 discovery: timeout for discovery requests (excluding dial timeout).
-  --discovery-keepalive-time '2s'
-    V3 discovery: keepalive time for client connections.
-  --discovery-keepalive-timeout '6s'
-    V3 discovery: keepalive timeout for client connections.
-  --discovery-insecure-transport 'true'
-    V3 discovery: disable transport security for client connections.
-  --discovery-insecure-skip-tls-verify 'false'
-    V3 discovery: skip server certificate verification (CAUTION: this option should be enabled only for testing purposes).
-  --discovery-cert ''
-    V3 discovery: identify secure client using this TLS certificate file.
-  --discovery-key ''
-    V3 discovery: identify secure client using this TLS key file.
-  --discovery-cacert ''
-    V3 discovery: verify certificates of TLS-enabled secure servers using this CA bundle.
-  --discovery-user ''
-    V3 discovery: username[:password] for authentication (prompt if password is not supplied).
-  --discovery-password ''
-    V3 discovery: password for authentication (if this option is used, --user option shouldn't include password).
-  --discovery-fallback 'exit'
-    Expected behavior ('exit') when discovery services fails. Note that v2 proxy is removed.
+    Discovery URL used to bootstrap the cluster.
+  --discovery-fallback 'proxy'
+    Expected behavior ('exit' or 'proxy') when discovery services fails.
+    "proxy" supports v2 API only.
   --discovery-proxy ''
-    HTTP proxy to use for traffic to discovery service. Will be deprecated in v3.7, and be decommissioned in v3.8.
+    HTTP proxy to use for traffic to discovery service.
   --discovery-srv ''
     DNS srv domain used to bootstrap the cluster.
   --discovery-srv-name ''
@@ -159,12 +130,14 @@ Clustering:
   --strict-reconfig-check '` + strconv.FormatBool(embed.DefaultStrictReconfigCheck) + `'
     Reject reconfiguration requests that would cause quorum loss.
   --pre-vote 'true'
-    Enable the raft Pre-Vote algorithm to prevent disruption when a node that has been partitioned away rejoins the cluster.
+    Enable to run an additional Raft election phase.
   --auto-compaction-retention '0'
     Auto compaction retention length. 0 means disable auto compaction.
   --auto-compaction-mode 'periodic'
     Interpret 'auto-compaction-retention' one of: periodic|revision. 'periodic' for duration based retention, defaulting to hours if no time unit is provided (e.g. '5m'). 'revision' for revision number based retention.
-  --v2-deprecation '` + string(cconfig.V2DeprDefault) + `'
+  --enable-v2 '` + strconv.FormatBool(embed.DefaultEnableV2) + `'
+    Accept etcd V2 client requests. Deprecated and to be decommissioned in v3.6.
+  --v2-deprecation '` + string(cconfig.V2_DEPR_DEFAULT) + `'
     Phase of v2store deprecation. Allows to opt-in for higher compatibility mode.
     Supported values:
       'not-yet'                // Issues a warning if v2store have meaningful content (default in v3.5)
@@ -186,7 +159,7 @@ Security:
   --client-crl-file ''
     Path to the client certificate revocation list file.
   --client-cert-allowed-hostname ''
-    Comma-separated list of SAN hostnames for client cert authentication.
+    Allowed TLS hostname for client cert authentication.
   --trusted-ca-file ''
     Path to the client server TLS trusted CA cert file.
   --auto-tls 'false'
@@ -197,18 +170,18 @@ Security:
     Path to the peer server TLS key file.
   --peer-client-cert-auth 'false'
     Enable peer client cert authentication.
+  --peer-trusted-ca-file ''
+    Path to the peer server TLS trusted CA file.
+  --peer-cert-allowed-cn ''
+    Required CN for client certs connecting to the peer endpoint.
+  --peer-cert-allowed-hostname ''
+    Allowed TLS hostname for inter peer authentication.
+  --peer-auto-tls 'false'
+    Peer TLS using self-generated certificates if --peer-key-file and --peer-cert-file are not provided.
   --peer-client-cert-file ''
     Path to an explicit peer client TLS cert file otherwise peer cert file will be used when client auth is required.
   --peer-client-key-file ''
     Path to an explicit peer client TLS key file otherwise peer key file will be used when client auth is required.
-  --peer-trusted-ca-file ''
-    Path to the peer server TLS trusted CA file.
-  --peer-cert-allowed-cn ''
-    Comma-separated list of allowed CNs for inter-peer TLS authentication.
-  --peer-cert-allowed-hostname ''
-    Comma-separated list of allowed SAN hostnames for inter-peer TLS authentication.
-  --peer-auto-tls 'false'
-    Peer TLS using self-generated certificates if --peer-key-file and --peer-cert-file are not provided.
   --self-signed-cert-validity '1'
     The validity period of the client and peer certificates that are automatically generated by etcd when you specify ClientAutoTLS and PeerAutoTLS, the unit is year, and the default is 1.
   --peer-crl-file ''
@@ -238,7 +211,7 @@ Profiling and Monitoring:
   --metrics 'basic'
     Set level of detail for exported metrics, specify 'extensive' to include server side grpc histogram metrics.
   --listen-metrics-urls ''
-    List of URLs to listen on for the /metrics and /health endpoints. For https, the client URL TLS info is used.
+    List of URLs to listen on for the metrics and health endpoints.
 
 Logging:
   --logger 'zap'
@@ -247,14 +220,10 @@ Logging:
     Specify 'stdout' or 'stderr' to skip journald logging even when running under systemd, or list of comma separated output targets.
   --log-level 'info'
     Configures log level. Only supports debug, info, warn, error, panic, or fatal.
-  --log-format 'json'
-    Configures log format. Only supports json, console.
   --enable-log-rotation 'false'
     Enable log rotation of a single log-outputs file target.
   --log-rotation-config-json '{"maxsize": 100, "maxage": 0, "maxbackups": 0, "localtime": false, "compress": false}'
-    Configures log rotation if enabled with a JSON logger config. MaxSize(MB), MaxAge(days,0=no limit), MaxBackups(0=no limit), LocalTime(use computers local time), Compress(gzip)".
-  --warning-unary-request-duration '300ms'
-    Set time duration after which a warning is logged if a unary request takes more than this duration.
+    Configures log rotation if enabled with a JSON logger config. MaxSize(MB), MaxAge(days,0=no limit), MaxBackups(0=no limit), LocalTime(use computers local time), Compress(gzip)". 
 
 Experimental distributed tracing:
   --experimental-enable-distributed-tracing 'false'
@@ -268,6 +237,20 @@ Experimental distributed tracing:
   --experimental-distributed-tracing-sampling-rate '0'
     Number of samples to collect per million spans for distributed tracing. Disabled by default.
 
+v2 Proxy (to be deprecated in v3.6):
+  --proxy 'off'
+    Proxy mode setting ('off', 'readonly' or 'on').
+  --proxy-failure-wait 5000
+    Time (in milliseconds) an endpoint will be held in a failed state.
+  --proxy-refresh-interval 30000
+    Time (in milliseconds) of the endpoints refresh interval.
+  --proxy-dial-timeout 1000
+    Time (in milliseconds) for a dial to timeout.
+  --proxy-write-timeout 5000
+    Time (in milliseconds) for a write to timeout.
+  --proxy-read-timeout 0
+    Time (in milliseconds) for a read to timeout.
+
 Experimental feature:
   --experimental-initial-corrupt-check 'false'
     Enable to check data corruption before serving any client/peer traffic.
@@ -277,36 +260,28 @@ Experimental feature:
     Enable leader to periodically check followers compaction hashes.
   --experimental-compact-hash-check-time '1m'
     Duration of time between leader checks followers compaction hashes.
+  --experimental-enable-v2v3 ''
+    Serve v2 requests through the v3 backend under a given prefix. Deprecated and to be decommissioned in v3.6.
   --experimental-enable-lease-checkpoint 'false'
     ExperimentalEnableLeaseCheckpoint enables primary lessor to persist lease remainingTTL to prevent indefinite auto-renewal of long lived leases.
+  --experimental-enable-lease-checkpoint-persist 'false'
+    Enable persisting remainingTTL to prevent indefinite auto-renewal of long lived leases. Always enabled in v3.6. Should be used to ensure smooth upgrade from v3.5 clusters with this feature enabled. Requires experimental-enable-lease-checkpoint to be enabled.
   --experimental-compaction-batch-limit 1000
     ExperimentalCompactionBatchLimit sets the maximum revisions deleted in each compaction batch.
   --experimental-peer-skip-client-san-verification 'false'
     Skip verification of SAN field in client certificate for peer connections.
   --experimental-watch-progress-notify-interval '10m'
     Duration of periodical watch progress notification.
+  --experimental-downgrade-check-time
+    Duration of time between two downgrade status checks.
+  --experimental-memory-mlock
+    Enable to enforce etcd pages (in particular bbolt) to stay in RAM.
   --experimental-warning-apply-duration '100ms'
-    Warning is generated if requests take more than this duration.
+	Warning is generated if requests take more than this duration.
   --experimental-txn-mode-write-with-shared-buffer 'true'
     Enable the write transaction to use a shared buffer in its readonly check operations.
   --experimental-bootstrap-defrag-threshold-megabytes
     Enable the defrag during etcd server bootstrap on condition that it will free at least the provided threshold of disk space. Needs to be set to non-zero value to take effect.
-  --experimental-warning-unary-request-duration '300ms'
-    Set time duration after which a warning is generated if a unary request takes more than this duration. It's deprecated, and will be decommissioned in v3.7. Use --warning-unary-request-duration instead.
-  --experimental-max-learners '1'
-    Set the max number of learner members allowed in the cluster membership.
-  --experimental-snapshot-catch-up-entries '5000'
-    Number of entries for a slow follower to catch up after compacting the raft storage entries.
-  --experimental-compaction-sleep-interval
-    Sets the sleep interval between each compaction batch.
-  --experimental-downgrade-check-time
-    Duration of time between two downgrade status checks.
-  --experimental-enable-lease-checkpoint-persist 'false'
-    Enable persisting remainingTTL to prevent indefinite auto-renewal of long lived leases. Always enabled in v3.6. Should be used to ensure smooth upgrade from v3.5 clusters with this feature enabled. Requires experimental-enable-lease-checkpoint to be enabled.
-  --experimental-memory-mlock
-    Enable to enforce etcd pages (in particular bbolt) to stay in RAM.
-  --experimental-snapshot-catchup-entries
-    Number of entries for a slow follower to catch up after compacting the raft storage entries.
   --experimental-stop-grpc-service-on-defrag
     Enable etcd gRPC service to stop serving client requests on defragmentation.
 

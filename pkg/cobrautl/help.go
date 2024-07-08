@@ -17,6 +17,7 @@
 package cobrautl
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -98,11 +99,11 @@ GLOBAL OPTIONS:
 {{end}}
 `[1:]
 
-	commandUsageTemplate = template.Must(template.New("command_usage").Funcs(templFuncs).Parse(strings.ReplaceAll(commandUsage, "\\\n", "")))
+	commandUsageTemplate = template.Must(template.New("command_usage").Funcs(templFuncs).Parse(strings.Replace(commandUsage, "\\\n", "", -1)))
 }
 
 func etcdFlagUsages(flagSet *pflag.FlagSet) string {
-	x := new(strings.Builder)
+	x := new(bytes.Buffer)
 
 	flagSet.VisitAll(func(flag *pflag.Flag) {
 		if len(flag.Deprecated) > 0 {

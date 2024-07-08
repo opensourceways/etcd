@@ -17,15 +17,14 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
-	"go.etcd.io/raft/v3/raftpb"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 func getSnapshotFn() (func() ([]byte, error), <-chan struct{}) {
@@ -78,7 +77,7 @@ func newCluster(n int) *cluster {
 func (clus *cluster) Close() (err error) {
 	for i := range clus.peers {
 		go func(i int) {
-			for range clus.commitC[i] { //revive:disable-line:empty-block
+			for range clus.commitC[i] {
 				// drain pending commits
 			}
 		}(i)
@@ -125,7 +124,7 @@ func TestProposeOnCommit(t *testing.T) {
 				}
 			}
 			donec <- struct{}{}
-			for range cC { //revive:disable-line:empty-block
+			for range cC {
 				// acknowledge the commits from other nodes so
 				// raft continues to make progress
 			}
@@ -153,12 +152,8 @@ func TestCloseProposerInflight(t *testing.T) {
 	clus := newCluster(1)
 	defer clus.closeNoErrors(t)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-
 	// some inflight ops
 	go func() {
-		defer wg.Done()
 		clus.proposeC[0] <- "foo"
 		clus.proposeC[0] <- "bar"
 	}()
@@ -167,8 +162,6 @@ func TestCloseProposerInflight(t *testing.T) {
 	if c, ok := <-clus.commitC[0]; !ok || c.data[0] != "foo" {
 		t.Fatalf("Commit failed")
 	}
-
-	wg.Wait()
 }
 
 func TestPutAndGetKeyValue(t *testing.T) {
@@ -200,7 +193,7 @@ func TestPutAndGetKeyValue(t *testing.T) {
 	body := bytes.NewBufferString(wantValue)
 	cli := srv.Client()
 
-	req, err := http.NewRequest(http.MethodPut, url, body)
+	req, err := http.NewRequest("PUT", url, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +211,7 @@ func TestPutAndGetKeyValue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}

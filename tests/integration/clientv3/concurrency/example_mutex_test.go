@@ -19,11 +19,11 @@ import (
 	"fmt"
 	"log"
 
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
 )
 
-func mockMutexTryLock() {
+func mockMutex_TryLock() {
 	fmt.Println("acquired lock for s1")
 	fmt.Println("cannot acquire lock for s2, as already locked in another session")
 	fmt.Println("released lock for s1")
@@ -32,7 +32,7 @@ func mockMutexTryLock() {
 
 func ExampleMutex_TryLock() {
 	forUnitTestsRunInMockedContext(
-		mockMutexTryLock,
+		mockMutex_TryLock,
 		func() {
 			cli, err := clientv3.New(clientv3.Config{Endpoints: exampleEndpoints()})
 			if err != nil {
@@ -85,7 +85,7 @@ func ExampleMutex_TryLock() {
 	// acquired lock for s2
 }
 
-func mockMutexLock() {
+func mockMutex_Lock() {
 	fmt.Println("acquired lock for s1")
 	fmt.Println("released lock for s1")
 	fmt.Println("acquired lock for s2")
@@ -93,7 +93,7 @@ func mockMutexLock() {
 
 func ExampleMutex_Lock() {
 	forUnitTestsRunInMockedContext(
-		mockMutexLock,
+		mockMutex_Lock,
 		func() {
 			cli, err := clientv3.New(clientv3.Config{Endpoints: exampleEndpoints()})
 			if err != nil {

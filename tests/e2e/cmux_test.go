@@ -31,10 +31,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
-	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/api/v3/version"
+	clientv2 "go.etcd.io/etcd/client/v2"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp"
-	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 )
 
@@ -43,7 +42,7 @@ func TestConnectionMultiplexing(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
 		serverTLS        e2e.ClientConnType
-		separateHTTPPort bool
+		separateHttpPort bool
 	}{
 		{
 			name:      "ServerTLS",
@@ -60,20 +59,18 @@ func TestConnectionMultiplexing(t *testing.T) {
 		{
 			name:             "SeparateHTTP/ServerTLS",
 			serverTLS:        e2e.ClientTLS,
-			separateHTTPPort: true,
+			separateHttpPort: true,
 		},
 		{
 			name:             "SeparateHTTP/ServerNonTLS",
 			serverTLS:        e2e.ClientNonTLS,
-			separateHTTPPort: true,
+			separateHttpPort: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			cfg := e2e.NewConfig(e2e.WithClusterSize(1))
-			cfg.Client.ConnectionType = tc.serverTLS
-			cfg.ClientHTTPSeparate = tc.separateHTTPPort
-			clus, err := e2e.NewEtcdProcessCluster(ctx, t, e2e.WithConfig(cfg))
+			cfg := e2e.EtcdProcessClusterConfig{ClusterSize: 1, ClientTLS: tc.serverTLS, EnableV2: true, ClientHttpSeparate: tc.separateHttpPort}
+			clus, err := e2e.NewEtcdProcessCluster(t, &cfg)
 			require.NoError(t, err)
 			defer clus.Close()
 
@@ -87,13 +84,13 @@ func TestConnectionMultiplexing(t *testing.T) {
 				clientScenarios = []e2e.ClientConnType{e2e.ClientTLS, e2e.ClientNonTLS}
 			}
 
-			for _, clientTLS := range clientScenarios {
+			for _, connType := range clientScenarios {
 				name := "ClientNonTLS"
-				if clientTLS == e2e.ClientTLS {
+				if connType == e2e.ClientTLS {
 					name = "ClientTLS"
 				}
 				t.Run(name, func(t *testing.T) {
-					testConnectionMultiplexing(ctx, t, clus.Procs[0], clientTLS)
+					testConnectionMultiplexing(ctx, t, clus.Procs[0], connType)
 				})
 			}
 		})
@@ -112,13 +109,26 @@ func testConnectionMultiplexing(ctx context.Context, t *testing.T, member e2e.Et
 		panic(fmt.Sprintf("Unsupported conn type %v", connType))
 	}
 	t.Run("etcdctl", func(t *testing.T) {
-		etcdctl, err := e2e.NewEtcdctl(e2e.ClientConfig{ConnectionType: connType}, []string{grpcEndpoint})
+		t.Run("v2", func(t *testing.T) {
+			etcdctl := e2e.NewEtcdctl([]string{httpEndpoint}, connType, false, true)
+			err := etcdctl.Set("a", "1")
+			assert.NoError(t, err)
+		})
+		t.Run("v3", func(t *testing.T) {
+			etcdctl := e2e.NewEtcdctl([]string{grpcEndpoint}, connType, false, false)
+			err := etcdctl.Put("a", "1")
+			assert.NoError(t, err)
+		})
+	})
+	t.Run("clientv2", func(t *testing.T) {
+		c, err := newClientV2(t, []string{httpEndpoint}, connType, false)
 		require.NoError(t, err)
-		_, err = etcdctl.Get(ctx, "a", config.GetOptions{})
+		kv := clientv2.NewKeysAPI(c)
+		_, err = kv.Set(ctx, "a", "1", nil)
 		assert.NoError(t, err)
 	})
 	t.Run("clientv3", func(t *testing.T) {
-		c := newClient(t, []string{grpcEndpoint}, e2e.ClientConfig{ConnectionType: connType})
+		c := newClient(t, []string{grpcEndpoint}, connType, false)
 		_, err := c.Get(ctx, "a")
 		assert.NoError(t, err)
 	})
@@ -129,7 +139,7 @@ func testConnectionMultiplexing(ctx context.Context, t *testing.T, member e2e.Et
 				tname = "default"
 			}
 			t.Run(tname, func(t *testing.T) {
-				assert.NoError(t, fetchGRPCGateway(httpEndpoint, httpVersion, connType))
+				assert.NoError(t, fetchGrpcGateway(httpEndpoint, httpVersion, connType))
 				assert.NoError(t, fetchMetrics(t, httpEndpoint, httpVersion, connType))
 				assert.NoError(t, fetchVersion(httpEndpoint, httpVersion, connType))
 				assert.NoError(t, fetchHealth(httpEndpoint, httpVersion, connType))
@@ -139,14 +149,14 @@ func testConnectionMultiplexing(ctx context.Context, t *testing.T, member e2e.Et
 	})
 }
 
-func fetchGRPCGateway(endpoint string, httpVersion string, connType e2e.ClientConnType) error {
+func fetchGrpcGateway(endpoint string, httpVersion string, connType e2e.ClientConnType) error {
 	rangeData, err := json.Marshal(&pb.RangeRequest{
 		Key: []byte("a"),
 	})
 	if err != nil {
 		return err
 	}
-	req := e2e.CURLReq{Endpoint: "/v3/kv/range", Value: string(rangeData), Timeout: 5, HTTPVersion: httpVersion}
+	req := e2e.CURLReq{Endpoint: "/v3/kv/range", Value: string(rangeData), Timeout: 5, HttpVersion: httpVersion}
 	respData, err := curl(endpoint, "POST", req, connType)
 	if err != nil {
 		return err
@@ -157,18 +167,24 @@ func fetchGRPCGateway(endpoint string, httpVersion string, connType e2e.ClientCo
 func validateGrpcgatewayRangeReponse(respData []byte) error {
 	// Modified json annotation so ResponseHeader fields are stored in string.
 	type responseHeader struct {
-		//revive:disable:var-naming
 		ClusterId uint64 `json:"cluster_id,string,omitempty"`
 		MemberId  uint64 `json:"member_id,string,omitempty"`
-		//revive:enable:var-naming
-		Revision int64  `json:"revision,string,omitempty"`
-		RaftTerm uint64 `json:"raft_term,string,omitempty"`
+		Revision  int64  `json:"revision,string,omitempty"`
+		RaftTerm  uint64 `json:"raft_term,string,omitempty"`
+	}
+	type keyValue struct {
+		Key            []byte `json:"key,omitempty"`
+		CreateRevision int64  `json:"create_revision,string,omitempty"`
+		ModRevision    int64  `json:"mod_revision,string,omitempty"`
+		Version        int64  `json:"version,string,omitempty"`
+		Value          []byte `json:"value,omitempty"`
+		Lease          int64  `json:"lease,omitempty"`
 	}
 	type rangeResponse struct {
-		Header *responseHeader    `json:"header,omitempty"`
-		Kvs    []*mvccpb.KeyValue `json:"kvs,omitempty"`
-		More   bool               `json:"more,omitempty"`
-		Count  int64              `json:"count,omitempty"`
+		Header *responseHeader `json:"header,omitempty"`
+		Kvs    []*keyValue     `json:"kvs,omitempty"`
+		More   bool            `json:"more,omitempty"`
+		Count  int64           `json:"count,string,omitempty"`
 	}
 	var resp rangeResponse
 	return json.Unmarshal(respData, &resp)
@@ -178,7 +194,7 @@ func fetchMetrics(t *testing.T, endpoint string, httpVersion string, connType e2
 	tmpDir := t.TempDir()
 	metricFile := filepath.Join(tmpDir, "metrics")
 
-	req := e2e.CURLReq{Endpoint: "/metrics", Timeout: 5, HTTPVersion: httpVersion, OutputFile: metricFile}
+	req := e2e.CURLReq{Endpoint: "/metrics", Timeout: 5, HttpVersion: httpVersion, OutputFile: metricFile}
 	if _, err := curl(endpoint, "GET", req, connType); err != nil {
 		return err
 	}
@@ -195,7 +211,7 @@ func fetchMetrics(t *testing.T, endpoint string, httpVersion string, connType e2
 }
 
 func fetchVersion(endpoint string, httpVersion string, connType e2e.ClientConnType) error {
-	req := e2e.CURLReq{Endpoint: "/version", Timeout: 5, HTTPVersion: httpVersion}
+	req := e2e.CURLReq{Endpoint: "/version", Timeout: 5, HttpVersion: httpVersion}
 	respData, err := curl(endpoint, "GET", req, connType)
 	if err != nil {
 		return err
@@ -205,7 +221,7 @@ func fetchVersion(endpoint string, httpVersion string, connType e2e.ClientConnTy
 }
 
 func fetchHealth(endpoint string, httpVersion string, connType e2e.ClientConnType) error {
-	req := e2e.CURLReq{Endpoint: "/health", Timeout: 5, HTTPVersion: httpVersion}
+	req := e2e.CURLReq{Endpoint: "/health", Timeout: 5, HttpVersion: httpVersion}
 	respData, err := curl(endpoint, "GET", req, connType)
 	if err != nil {
 		return err
@@ -215,11 +231,20 @@ func fetchHealth(endpoint string, httpVersion string, connType e2e.ClientConnTyp
 }
 
 func fetchDebugVars(endpoint string, httpVersion string, connType e2e.ClientConnType) error {
-	req := e2e.CURLReq{Endpoint: "/debug/vars", Timeout: 5, HTTPVersion: httpVersion}
+	req := e2e.CURLReq{Endpoint: "/debug/vars", Timeout: 5, HttpVersion: httpVersion}
 	respData, err := curl(endpoint, "GET", req, connType)
 	if err != nil {
 		return err
 	}
-	var resp map[string]any
+	var resp map[string]interface{}
 	return json.Unmarshal([]byte(respData), &resp)
+}
+
+func curl(endpoint string, method string, curlReq e2e.CURLReq, connType e2e.ClientConnType) (string, error) {
+	args := e2e.CURLPrefixArgs(endpoint, connType, false, method, curlReq)
+	lines, err := e2e.RunUtilCompletion(args, nil)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(lines, "\n"), nil
 }

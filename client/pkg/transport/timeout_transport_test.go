@@ -16,7 +16,7 @@ package transport
 
 import (
 	"bytes"
-	"io"
+	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -63,7 +63,7 @@ func TestNewTimeoutTransport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %v", err)
 	}
-	addr0, err := io.ReadAll(resp.Body)
+	addr0, err := ioutil.ReadAll(resp.Body)
 	resp.Body.Close()
 	if err != nil {
 		t.Fatalf("unexpected err %v", err)
@@ -73,13 +73,13 @@ func TestNewTimeoutTransport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %v", err)
 	}
-	addr1, err := io.ReadAll(resp.Body)
+	addr1, err := ioutil.ReadAll(resp.Body)
 	resp.Body.Close()
 	if err != nil {
 		t.Fatalf("unexpected err %v", err)
 	}
 
 	if bytes.Equal(addr0, addr1) {
-		t.Errorf("addr0 = %s addr1= %s, want not equal", addr0, addr1)
+		t.Errorf("addr0 = %s addr1= %s, want not equal", string(addr0), string(addr1))
 	}
 }

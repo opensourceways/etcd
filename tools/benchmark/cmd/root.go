@@ -18,10 +18,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cheggaaa/pb/v3"
-	"github.com/spf13/cobra"
-
 	"go.etcd.io/etcd/client/pkg/v3/transport"
+
+	"github.com/spf13/cobra"
+	"gopkg.in/cheggaaa/pb.v1"
 )
 
 // This represents the base command when called without any subcommands
@@ -53,8 +53,7 @@ var (
 
 	dialTimeout time.Duration
 
-	targetLeader     bool
-	autoSyncInterval time.Duration
+	targetLeader bool
 )
 
 func init() {
@@ -72,5 +71,4 @@ func init() {
 	RootCmd.PersistentFlags().DurationVar(&dialTimeout, "dial-timeout", 0, "dial timeout for client connections")
 
 	RootCmd.PersistentFlags().BoolVar(&targetLeader, "target-leader", false, "connect only to the leader node")
-	RootCmd.PersistentFlags().DurationVar(&autoSyncInterval, "auto-sync-interval", time.Duration(0), "AutoSyncInterval is the interval to update endpoints with its latest members")
 }

@@ -20,7 +20,6 @@ package auth
 import (
 	"context"
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"math/big"
 	"strconv"
@@ -168,7 +167,7 @@ func (t *tokenSimple) enable() {
 
 	delf := func(tk string) {
 		if username, ok := t.simpleTokens[tk]; ok {
-			t.lg.Debug(
+			t.lg.Info(
 				"deleted a simple token",
 				zap.String("user-name", username),
 				zap.String("token", tk),
@@ -213,11 +212,7 @@ func (t *tokenSimple) info(ctx context.Context, token string, revision uint64) (
 
 func (t *tokenSimple) assign(ctx context.Context, username string, rev uint64) (string, error) {
 	// rev isn't used in simple token, it is only used in JWT
-	var index uint64
-	var ok bool
-	if index, ok = ctx.Value(AuthenticateParamIndex{}).(uint64); !ok {
-		return "", errors.New("failed to assign")
-	}
+	index := ctx.Value(AuthenticateParamIndex{}).(uint64)
 	simpleTokenPrefix := ctx.Value(AuthenticateParamSimpleTokenPrefix{}).(string)
 	token := fmt.Sprintf("%s.%d", simpleTokenPrefix, index)
 	t.assignSimpleTokenToUser(username, token)
@@ -236,7 +231,7 @@ func (t *tokenSimple) isValidSimpleToken(ctx context.Context, token string) bool
 	}
 
 	select {
-	case <-t.indexWaiter(index):
+	case <-t.indexWaiter(uint64(index)):
 		return true
 	case <-ctx.Done():
 	}

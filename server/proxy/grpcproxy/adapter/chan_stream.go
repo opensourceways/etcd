@@ -96,15 +96,15 @@ func (cs *chanClientStream) CloseSend() error {
 
 // chanStream implements grpc.Stream using channels
 type chanStream struct {
-	recvc  <-chan any
-	sendc  chan<- any
+	recvc  <-chan interface{}
+	sendc  chan<- interface{}
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
 func (s *chanStream) Context() context.Context { return s.ctx }
 
-func (s *chanStream) SendMsg(m any) error {
+func (s *chanStream) SendMsg(m interface{}) error {
 	select {
 	case s.sendc <- m:
 		if err, ok := m.(error); ok {
@@ -116,8 +116,8 @@ func (s *chanStream) SendMsg(m any) error {
 	return s.ctx.Err()
 }
 
-func (s *chanStream) RecvMsg(m any) error {
-	v := m.(*any)
+func (s *chanStream) RecvMsg(m interface{}) error {
+	v := m.(*interface{})
 	for {
 		select {
 		case msg, ok := <-s.recvc:
@@ -141,7 +141,7 @@ func (s *chanStream) RecvMsg(m any) error {
 
 func newPipeStream(ctx context.Context, ssHandler func(chanServerStream) error) chanClientStream {
 	// ch1 is buffered so server can send error on close
-	ch1, ch2 := make(chan any, 1), make(chan any)
+	ch1, ch2 := make(chan interface{}, 1), make(chan interface{})
 	headerc, trailerc := make(chan metadata.MD, 1), make(chan metadata.MD, 1)
 
 	cctx, ccancel := context.WithCancel(ctx)

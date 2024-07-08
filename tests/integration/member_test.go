@@ -17,61 +17,65 @@ package integration
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
+	"reflect"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
-	"go.etcd.io/etcd/server/v3/etcdserver"
-	"go.etcd.io/etcd/server/v3/storage/schema"
-	"go.etcd.io/etcd/tests/v3/framework/integration"
+	"go.etcd.io/etcd/client/v2"
 )
 
 func TestPauseMember(t *testing.T) {
-	integration.BeforeTest(t)
+	BeforeTest(t)
 
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 5})
+	c := NewCluster(t, 5)
+	c.Launch(t)
 	defer c.Terminate(t)
 
 	for i := 0; i < 5; i++ {
 		c.Members[i].Pause()
-		membs := append([]*integration.Member{}, c.Members[:i]...)
+		membs := append([]*member{}, c.Members[:i]...)
 		membs = append(membs, c.Members[i+1:]...)
-		c.WaitMembersForLeader(t, membs)
+		c.waitLeader(t, membs)
 		clusterMustProgress(t, membs)
 		c.Members[i].Resume()
 	}
-	c.WaitMembersForLeader(t, c.Members)
+	c.waitLeader(t, c.Members)
 	clusterMustProgress(t, c.Members)
 }
 
 func TestRestartMember(t *testing.T) {
-	integration.BeforeTest(t)
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, UseBridge: true})
+	BeforeTest(t)
+	c := newCluster(t, &ClusterConfig{Size: 3, UseBridge: true})
+	c.Launch(t)
 	defer c.Terminate(t)
 
 	for i := 0; i < 3; i++ {
 		c.Members[i].Stop(t)
-		membs := append([]*integration.Member{}, c.Members[:i]...)
+		membs := append([]*member{}, c.Members[:i]...)
 		membs = append(membs, c.Members[i+1:]...)
-		c.WaitMembersForLeader(t, membs)
+		c.waitLeader(t, membs)
 		clusterMustProgress(t, membs)
 		err := c.Members[i].Restart(t)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	c.WaitMembersForLeader(t, c.Members)
+	c.waitLeader(t, c.Members)
 	clusterMustProgress(t, c.Members)
 }
 
 func TestLaunchDuplicateMemberShouldFail(t *testing.T) {
-	integration.BeforeTest(t)
+	BeforeTest(t)
 	size := 3
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: size})
+	c := NewCluster(t, size)
 	m := c.Members[0].Clone(t)
-	m.DataDir = t.TempDir()
+	var err error
+	m.DataDir, err = ioutil.TempDir(t.TempDir(), "etcd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Launch(t)
 	defer c.Terminate(t)
 
 	if err := m.Launch(); err == nil {
@@ -83,19 +87,21 @@ func TestLaunchDuplicateMemberShouldFail(t *testing.T) {
 }
 
 func TestSnapshotAndRestartMember(t *testing.T) {
-	integration.BeforeTest(t)
-	m := integration.MustNewMember(t, integration.MemberConfig{Name: "snapAndRestartTest", UseBridge: true})
+	BeforeTest(t)
+	m := mustNewMember(t, memberConfig{name: "snapAndRestartTest", useBridge: true})
 	m.SnapshotCount = 100
 	m.Launch()
 	defer m.Terminate(t)
-	defer m.Client.Close()
 	m.WaitOK(t)
 
+	resps := make([]*client.Response, 120)
 	var err error
 	for i := 0; i < 120; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), integration.RequestTimeout)
+		cc := MustNewHTTPClient(t, []string{m.URL()}, nil)
+		kapi := client.NewKeysAPI(cc)
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 		key := fmt.Sprintf("foo%d", i)
-		_, err = m.Client.Put(ctx, "/"+key, "bar")
+		resps[i], err = kapi.Create(ctx, "/"+key, "bar")
 		if err != nil {
 			t.Fatalf("#%d: create on %s error: %v", i, m.URL(), err)
 		}
@@ -106,43 +112,18 @@ func TestSnapshotAndRestartMember(t *testing.T) {
 
 	m.WaitOK(t)
 	for i := 0; i < 120; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), integration.RequestTimeout)
+		cc := MustNewHTTPClient(t, []string{m.URL()}, nil)
+		kapi := client.NewKeysAPI(cc)
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 		key := fmt.Sprintf("foo%d", i)
-		resp, err := m.Client.Get(ctx, "/"+key)
+		resp, err := kapi.Get(ctx, "/"+key, nil)
 		if err != nil {
 			t.Fatalf("#%d: get on %s error: %v", i, m.URL(), err)
 		}
 		cancel()
 
-		if len(resp.Kvs) != 1 || string(resp.Kvs[0].Value) != "bar" {
-			t.Errorf("#%d: got = %v, want %v", i, resp.Kvs[0], "bar")
+		if !reflect.DeepEqual(resp.Node, resps[i].Node) {
+			t.Errorf("#%d: node = %v, want %v", i, resp.Node, resps[i].Node)
 		}
-	}
-}
-
-func TestRemoveMember(t *testing.T) {
-	integration.BeforeTest(t)
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, UseBridge: true, BackendBatchInterval: 1000 * time.Second})
-	defer c.Terminate(t)
-	// membership changes additionally require cluster to be stable for etcdserver.HealthInterval
-	time.Sleep(etcdserver.HealthInterval)
-
-	err := c.RemoveMember(t, c.Client(2), uint64(c.Members[0].ID()))
-	require.NoError(t, err)
-
-	checkMemberCount(t, c.Members[0], 2)
-	checkMemberCount(t, c.Members[1], 2)
-}
-
-func checkMemberCount(t *testing.T, m *integration.Member, expectedMemberCount int) {
-	be := schema.NewMembershipBackend(m.Logger, m.Server.Backend())
-	membersFromBackend, _ := be.MustReadMembersFromBackend()
-	if len(membersFromBackend) != expectedMemberCount {
-		t.Errorf("Expect member count read from backend=%d, got %d", expectedMemberCount, len(membersFromBackend))
-	}
-	membersResp, err := m.Client.MemberList(context.Background())
-	require.NoError(t, err)
-	if len(membersResp.Members) != expectedMemberCount {
-		t.Errorf("Expect len(MemberList)=%d, got %d", expectedMemberCount, len(membersResp.Members))
 	}
 }

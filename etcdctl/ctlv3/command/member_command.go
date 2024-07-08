@@ -21,15 +21,13 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 )
 
 var (
-	memberPeerURLs    string
-	isLearner         bool
-	memberConsistency string
+	memberPeerURLs string
+	isLearner      bool
 )
 
 // NewMemberCommand returns the cobra command for "member".
@@ -101,8 +99,6 @@ The items in the lists are ID, Status, Name, Peer Addrs, Client Addrs, Is Learne
 		Run: memberListCommandFunc,
 	}
 
-	cc.Flags().StringVar(&memberConsistency, "consistency", "l", "Linearizable(l) or Serializable(s)")
-
 	return cc
 }
 
@@ -161,7 +157,7 @@ func memberAddCommandFunc(cmd *cobra.Command, args []string) {
 	display.MemberAdd(*resp)
 
 	if _, ok := (display).(*simplePrinter); ok {
-		var conf []string
+		conf := []string{}
 		for _, memb := range resp.Members {
 			for _, u := range memb.PeerURLs {
 				n := memb.Name
@@ -176,7 +172,7 @@ func memberAddCommandFunc(cmd *cobra.Command, args []string) {
 		fmt.Printf("ETCD_NAME=%q\n", newMemberName)
 		fmt.Printf("ETCD_INITIAL_CLUSTER=%q\n", strings.Join(conf, ","))
 		fmt.Printf("ETCD_INITIAL_ADVERTISE_PEER_URLS=%q\n", memberPeerURLs)
-		fmt.Print("ETCD_INITIAL_CLUSTER_STATE=\"existing\"\n")
+		fmt.Printf("ETCD_INITIAL_CLUSTER_STATE=\"existing\"\n")
 	}
 }
 
@@ -229,12 +225,8 @@ func memberUpdateCommandFunc(cmd *cobra.Command, args []string) {
 
 // memberListCommandFunc executes the "member list" command.
 func memberListCommandFunc(cmd *cobra.Command, args []string) {
-	var opts []clientv3.OpOption
-	if IsSerializable(memberConsistency) {
-		opts = append(opts, clientv3.WithSerializable())
-	}
 	ctx, cancel := commandCtx(cmd)
-	resp, err := mustClientFromCmd(cmd).MemberList(ctx, opts...)
+	resp, err := mustClientFromCmd(cmd).MemberList(ctx)
 	cancel()
 	if err != nil {
 		cobrautl.ExitWithError(cobrautl.ExitError, err)

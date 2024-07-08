@@ -89,7 +89,7 @@ main() {
   if [ ! -d "${reldir}/etcd" ] && [ "${IN_PLACE}" == 0 ]; then
     mkdir -p "${reldir}"
     cd "${reldir}"
-    run git clone "${REPOSITORY}" --branch "${BRANCH}" --depth 1
+    run git clone "${REPOSITORY}" --branch "${BRANCH}"
     run cd "${reldir}/etcd" || exit 2
     run git checkout "${BRANCH}" || exit 2
     run git pull origin
@@ -140,7 +140,7 @@ main() {
 
 
     log_callout "Building etcd and checking --version output"
-    run ./scripts/build.sh
+    run ./build.sh
     local etcd_version
     etcd_version=$(bin/etcd --version | grep "etcd Version" | awk '{ print $3 }')
     if [[ "${etcd_version}" != "${VERSION}" ]]; then
@@ -151,8 +151,8 @@ main() {
     if [[ -n $(git status -s) ]]; then
       log_callout "Committing mods & api/version/version.go update."
       run git add api/version/version.go
-      # shellcheck disable=SC2038,SC2046
-      run git add $(find . -name go.mod ! -path './release/*'| xargs)
+      # shellcheck disable=SC2038,SC2046,SC2185
+      run git add $(find -name go.mod ! -path './release/*'| xargs)
       run git diff --staged | cat
       run git commit -m "version: bump up to ${VERSION}"
       run git diff --staged | cat
@@ -280,6 +280,9 @@ main() {
 
     log_callout "Pushing container manifest list to gcr.io ${RELEASE_VERSION}"
     maybe_run docker manifest push "gcr.io/etcd-development/etcd:${RELEASE_VERSION}"
+
+    log_callout "Setting permissions using gsutil..."
+    maybe_run gsutil -m acl ch -u allUsers:R -r gs://artifacts.etcd-development.appspot.com
   fi
 
   ### Release validation

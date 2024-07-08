@@ -13,11 +13,10 @@
 // limitations under the License.
 
 //go:build !cluster_proxy
+// +build !cluster_proxy
 
 package e2e
 
-import "testing"
-
-func NewEtcdProcess(t testing.TB, cfg *EtcdServerProcessConfig) (EtcdProcess, error) {
-	return NewEtcdServerProcess(t, cfg)
+func NewEtcdProcess(cfg *EtcdServerProcessConfig) (EtcdProcess, error) {
+	return NewEtcdServerProcess(cfg)
 }

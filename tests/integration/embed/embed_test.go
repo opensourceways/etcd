@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //go:build !cluster_proxy
+// +build !cluster_proxy
 
 // Keep the test in a separate package from other tests such that
 // .setupLogging method does not race with other (previously running) servers (grpclog is global).
@@ -29,21 +30,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
-	"go.etcd.io/etcd/tests/v3/framework/testutils"
+	"go.etcd.io/etcd/tests/v3/integration"
 )
 
 var (
 	testTLSInfo = transport.TLSInfo{
-		KeyFile:        testutils.MustAbsPath("../../fixtures/server.key.insecure"),
-		CertFile:       testutils.MustAbsPath("../../fixtures/server.crt"),
-		TrustedCAFile:  testutils.MustAbsPath("../../fixtures/ca.crt"),
+		KeyFile:        integration.MustAbsPath("../../fixtures/server.key.insecure"),
+		CertFile:       integration.MustAbsPath("../../fixtures/server.crt"),
+		TrustedCAFile:  integration.MustAbsPath("../../fixtures/ca.crt"),
 		ClientCertAuth: true,
 	}
 )
@@ -91,7 +89,7 @@ func TestEmbedEtcd(t *testing.T) {
 	tests[7].cfg.ListenClientUrls = []url.URL{*dnsURL}
 	tests[8].cfg.ListenPeerUrls = []url.URL{*dnsURL}
 
-	dir := filepath.Join(t.TempDir(), "embed-etcd")
+	dir := filepath.Join(t.TempDir(), fmt.Sprintf("embed-etcd"))
 
 	for i, tt := range tests {
 		tests[i].cfg.Dir = dir
@@ -145,7 +143,7 @@ func testEmbedEtcdGracefulStop(t *testing.T, secure bool) {
 	urls := newEmbedURLs(secure, 2)
 	setupEmbedCfg(cfg, []url.URL{urls[0]}, []url.URL{urls[1]})
 
-	cfg.Dir = filepath.Join(t.TempDir(), "embed-etcd")
+	cfg.Dir = filepath.Join(t.TempDir(), fmt.Sprintf("embed-etcd"))
 
 	e, err := embed.StartEtcd(cfg)
 	if err != nil {
@@ -162,7 +160,7 @@ func testEmbedEtcdGracefulStop(t *testing.T, secure bool) {
 			t.Fatal(err)
 		}
 	}
-	cli, err := integration2.NewClient(t, clientCfg)
+	cli, err := integration.NewClient(t, clientCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,20 +209,4 @@ func setupEmbedCfg(cfg *embed.Config, curls []url.URL, purls []url.URL) {
 		cfg.InitialCluster += ",default=" + purls[i].String()
 	}
 	cfg.InitialCluster = cfg.InitialCluster[1:]
-}
-
-func TestEmbedEtcdAutoCompactionRetentionRetained(t *testing.T) {
-	cfg := embed.NewConfig()
-	urls := newEmbedURLs(false, 2)
-	setupEmbedCfg(cfg, []url.URL{urls[0]}, []url.URL{urls[1]})
-	cfg.Dir = filepath.Join(t.TempDir(), "embed-etcd")
-
-	cfg.AutoCompactionRetention = "2"
-
-	e, err := embed.StartEtcd(cfg)
-	assert.NoError(t, err)
-	autoCompactionRetention := e.Server.Cfg.AutoCompactionRetention
-	durationToCompare, _ := time.ParseDuration("2h0m0s")
-	assert.Equal(t, durationToCompare, autoCompactionRetention)
-	e.Close()
 }

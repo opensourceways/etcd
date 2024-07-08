@@ -73,6 +73,7 @@ function relativePath {
   local commonPart=$source
   local result=""
 
+  # Refer to https://www.shellcheck.net/wiki/SC2295
   while [[ "${target#"$commonPart"}" == "${target}" ]]; do
     # no match, means that candidate common part is not correct
     # go up one level (reduce common part)
@@ -92,6 +93,7 @@ function relativePath {
 
   # since we now have identified the common part,
   # compute the non-common part
+  # Refer to https://www.shellcheck.net/wiki/SC2295
   local forwardPart="${target#"$commonPart"}"
 
   # and now stick all parts together
@@ -166,25 +168,23 @@ function run_for_module {
 }
 
 function module_dirs() {
-  echo "api pkg client/pkg client/internal/v2 client/v3 server etcdutl etcdctl tests tools/rw-heatmaps tools/testgrid-analysis ."
+  echo "api pkg raft client/pkg client/v2 client/v3 server etcdutl etcdctl tests ."
 }
 
 # maybe_run [cmd...] runs given command depending on the DRY_RUN flag.
 function maybe_run() {
-  if ${DRY_RUN}; then
+  if ${DRY_RUN:-}; then
     log_warning -e "# DRY_RUN:\\n  % ${*}"
   else
     run "${@}"
   fi
 }
 
-# modules
-# returns the list of all modules in the project, not including the tools,
-# as they are not considered to be added to the bill for materials.
 function modules() {
   modules=(
     "${ROOT_MODULE}/api/v3"
     "${ROOT_MODULE}/pkg/v3"
+    "${ROOT_MODULE}/raft/v3"
     "${ROOT_MODULE}/client/pkg/v3"
     "${ROOT_MODULE}/client/v2"
     "${ROOT_MODULE}/client/v3"
@@ -206,56 +206,14 @@ function modules_exp() {
 #  run given command across all modules and packages
 #  (unless the set is limited using ${PKG} or / ${USERMOD})
 function run_for_modules {
-  KEEP_GOING_MODULE=${KEEP_GOING_MODULE:-false}
   local pkg="${PKG:-./...}"
-  local fail_mod=false
   if [ -z "${USERMOD:-}" ]; then
     for m in $(module_dirs); do
-      if run_for_module "${m}" "$@" "${pkg}"; then
-        continue
-      else
-        if [ "$KEEP_GOING_MODULE" = false ]; then
-          log_error "There was a Failure in module ${m}, aborting..."
-          return 1
-        fi
-        log_error "There was a Failure in module ${m}, keep going..."
-        fail_mod=true
-      fi
+      run_for_module "${m}" "$@" "${pkg}" || return "$?"
     done
-    if [ "$fail_mod" = true ]; then
-      return 1
-    fi
   else
     run_for_module "${USERMOD}" "$@" "${pkg}" || return "$?"
   fi
-}
-
-junitFilenamePrefix() {
-  if [[ -z "${JUNIT_REPORT_DIR:-}" ]]; then
-    echo ""
-    return
-  fi
-  mkdir -p "${JUNIT_REPORT_DIR}"
-  DATE=$( date +%s | base64 | head -c 15 )
-  echo "${JUNIT_REPORT_DIR}/junit_$DATE"
-}
-
-function produce_junit_xmlreport {
-  local -r junit_filename_prefix=${1:-}
-  if [[ -z "${junit_filename_prefix}" ]]; then
-    return
-  fi
-
-  local junit_xml_filename
-  junit_xml_filename="${junit_filename_prefix}.xml"
-
-  # Ensure that gotestsum is run without cross-compiling
-  run_go_tool gotest.tools/gotestsum --junitfile "${junit_xml_filename}" --raw-command cat "${junit_filename_prefix}"*.stdout || exit 1
-  if [ "${VERBOSE:-}" != "1" ]; then
-    rm "${junit_filename_prefix}"*.stdout
-  fi
-
-  log_callout "Saved JUnit XML test report to ${junit_xml_filename}"
 }
 
 
@@ -282,36 +240,13 @@ function go_test {
   local packages="${1}"
   local mode="${2}"
   local flags_for_package_func="${3}"
-  local junit_filename_prefix
 
   shift 3
 
   local goTestFlags=""
   local goTestEnv=""
-
-  ##### Create a junit-style XML test report in this directory if set. #####
-  JUNIT_REPORT_DIR=${JUNIT_REPORT_DIR:-}
-
-  # If JUNIT_REPORT_DIR is unset, and ARTIFACTS is set, then have them match.
-  if [[ -z "${JUNIT_REPORT_DIR:-}" && -n "${ARTIFACTS:-}" ]]; then
-    export JUNIT_REPORT_DIR="${ARTIFACTS}"
-  fi
-
-  # Used to filter verbose test output.
-  go_test_grep_pattern=".*"
-
-  if [[ -n "${JUNIT_REPORT_DIR}" ]] ; then
-    goTestFlags+="-v "
-    goTestFlags+="-json "
-    # Show only summary lines by matching lines like "status package/test"
-    go_test_grep_pattern="^[^[:space:]]\+[[:space:]]\+[^[:space:]]\+/[^[[:space:]]\+"
-  fi
-
-  junit_filename_prefix=$(junitFilenamePrefix)
-
   if [ "${VERBOSE:-}" == "1" ]; then
-    goTestFlags="-v "
-    goTestFlags+="-json "
+    goTestFlags="-v"
   fi
 
   # Expanding patterns (like ./...) into list of packages
@@ -326,10 +261,6 @@ function go_test {
     fi
   fi
 
-  if [ "${mode}" == "fail_fast" ]; then
-    goTestFlags+="-failfast "
-  fi
-
   local failures=""
 
   # execution of tests against packages:
@@ -339,18 +270,16 @@ function go_test {
     additional_flags=$(${flags_for_package_func} ${pkg})
 
     # shellcheck disable=SC2206
-    local cmd=( go test ${goTestFlags} ${additional_flags} ${pkg} "$@" )
+    local cmd=( go test ${goTestFlags} ${additional_flags} "$@" ${pkg} )
 
     # shellcheck disable=SC2086
-    if ! run env ${goTestEnv} ETCD_VERIFY="${ETCD_VERIFY}" "${cmd[@]}" | tee ${junit_filename_prefix:+"${junit_filename_prefix}.stdout"} | grep --binary-files=text "${go_test_grep_pattern}" ; then
+    if ! run env ${goTestEnv} "${cmd[@]}" ; then
       if [ "${mode}" != "keep_going" ]; then
-        produce_junit_xmlreport "${junit_filename_prefix}"
         return 2
       else
         failures=("${failures[@]}" "${pkg}")
       fi
     fi
-    produce_junit_xmlreport "${junit_filename_prefix}"
   done
 
   if [ -n "${failures[*]}" ] ; then
@@ -408,23 +337,22 @@ function tool_pkg_dir {
 # tool_get_bin [tool]
 function run_go_tool {
   local cmdbin
-  if ! cmdbin=$(GOARCH="" tool_get_bin "${1}"); then
-    log_warning "Failed to install tool '${1}'"
+  if ! cmdbin=$(tool_get_bin "${1}"); then
     return 2
   fi
   shift 1
-  GOARCH="" run "${cmdbin}" "$@" || return 2
+  run "${cmdbin}" "$@" || return 2
 }
 
-# assert_no_git_modifications fails if there are any uncommitted changes.
+# assert_no_git_modifications fails if there are any uncommited changes.
 function assert_no_git_modifications {
   log_callout "Making sure everything is committed."
   if ! git diff --cached --exit-code; then
-    log_error "Found staged by uncommitted changes. Do commit/stash your changes first."
+    log_error "Found staged by uncommited changes. Do commit/stash your changes first."
     return 2
   fi
   if ! git diff  --exit-code; then
-    log_error "Found unstaged and uncommitted changes. Do commit/stash your changes first."
+    log_error "Found unstaged and uncommited changes. Do commit/stash your changes first."
     return 2
   fi
 }

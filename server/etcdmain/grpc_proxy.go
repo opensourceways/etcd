@@ -19,7 +19,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"log"
 	"math"
 	"net"
@@ -28,18 +28,6 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
-	grpc_ctxtags "github.com/grpc-ecosystem/go-grpc-middleware/tags"
-	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
-	"github.com/soheilhy/cmux"
-	"github.com/spf13/cobra"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapgrpc"
-	"golang.org/x/net/http2"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/grpclog"
-	"google.golang.org/grpc/keepalive"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
@@ -54,6 +42,16 @@ import (
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v3election/v3electionpb"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v3lock/v3lockpb"
 	"go.etcd.io/etcd/server/v3/proxy/grpcproxy"
+
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"github.com/soheilhy/cmux"
+	"github.com/spf13/cobra"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapgrpc"
+	"golang.org/x/net/http2"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/grpclog"
+	"google.golang.org/grpc/keepalive"
 )
 
 var (
@@ -97,7 +95,6 @@ var (
 
 	grpcProxyEnablePprof    bool
 	grpcProxyEnableOrdering bool
-	grpcProxyEnableLogging  bool
 
 	grpcProxyDebug bool
 
@@ -173,7 +170,6 @@ func newGRPCProxyStartCommand() *cobra.Command {
 	// experimental flags
 	cmd.Flags().BoolVar(&grpcProxyEnableOrdering, "experimental-serializable-ordering", false, "Ensure serializable reads have monotonically increasing store revisions across endpoints.")
 	cmd.Flags().StringVar(&grpcProxyLeasing, "experimental-leasing-prefix", "", "leasing metadata prefix for disconnected linearized reads.")
-	cmd.Flags().BoolVar(&grpcProxyEnableLogging, "experimental-enable-grpc-logging", false, "logging all grpc requests and responses")
 
 	cmd.Flags().BoolVar(&grpcProxyDebug, "debug", false, "Enable debug-level logging for grpc-proxy.")
 
@@ -236,7 +232,7 @@ func startGRPCProxy(cmd *cobra.Command, args []string) {
 	if grpcProxyAdvertiseClientURL != "" {
 		proxyClient = mustNewProxyClient(lg, tlsInfo)
 	}
-	httpClient := mustNewHTTPClient()
+	httpClient := mustNewHTTPClient(lg)
 
 	srvhttp, httpl := mustHTTPListener(lg, m, tlsInfo, client, proxyClient)
 
@@ -460,28 +456,9 @@ func newGRPCProxyServer(lg *zap.Logger, client *clientv3.Client) *grpc.Server {
 	electionp := grpcproxy.NewElectionProxy(client)
 	lockp := grpcproxy.NewLockProxy(client)
 
-	alwaysLoggingDeciderServer := func(ctx context.Context, fullMethodName string, servingObject any) bool { return true }
-
-	grpcChainStreamList := []grpc.StreamServerInterceptor{
-		grpc_prometheus.StreamServerInterceptor,
-	}
-	grpcChainUnaryList := []grpc.UnaryServerInterceptor{
-		grpc_prometheus.UnaryServerInterceptor,
-	}
-	if grpcProxyEnableLogging {
-		grpcChainStreamList = append(grpcChainStreamList,
-			grpc_ctxtags.StreamServerInterceptor(),
-			grpc_zap.PayloadStreamServerInterceptor(lg, alwaysLoggingDeciderServer),
-		)
-		grpcChainUnaryList = append(grpcChainUnaryList,
-			grpc_ctxtags.UnaryServerInterceptor(),
-			grpc_zap.PayloadUnaryServerInterceptor(lg, alwaysLoggingDeciderServer),
-		)
-	}
-
 	gopts := []grpc.ServerOption{
-		grpc.ChainStreamInterceptor(grpcChainStreamList...),
-		grpc.ChainUnaryInterceptor(grpcChainUnaryList...),
+		grpc.StreamInterceptor(grpc_prometheus.StreamServerInterceptor),
+		grpc.UnaryInterceptor(grpc_prometheus.UnaryServerInterceptor),
 		grpc.MaxConcurrentStreams(math.MaxUint32),
 	}
 	if grpcKeepAliveMinTime > time.Duration(0) {
@@ -513,7 +490,7 @@ func newGRPCProxyServer(lg *zap.Logger, client *clientv3.Client) *grpc.Server {
 }
 
 func mustHTTPListener(lg *zap.Logger, m cmux.CMux, tlsinfo *transport.TLSInfo, c *clientv3.Client, proxy *clientv3.Client) (*http.Server, net.Listener) {
-	httpClient := mustNewHTTPClient()
+	httpClient := mustNewHTTPClient(lg)
 	httpmux := http.NewServeMux()
 	httpmux.HandleFunc("/", http.NotFound)
 	grpcproxy.HandleMetrics(httpmux, httpClient, c.Endpoints())
@@ -528,7 +505,7 @@ func mustHTTPListener(lg *zap.Logger, m cmux.CMux, tlsinfo *transport.TLSInfo, c
 	}
 	srvhttp := &http.Server{
 		Handler:  httpmux,
-		ErrorLog: log.New(io.Discard, "net/http", 0),
+		ErrorLog: log.New(ioutil.Discard, "net/http", 0),
 	}
 
 	if tlsinfo == nil {
@@ -543,7 +520,7 @@ func mustHTTPListener(lg *zap.Logger, m cmux.CMux, tlsinfo *transport.TLSInfo, c
 	return srvhttp, m.Match(cmux.Any())
 }
 
-func mustNewHTTPClient() *http.Client {
+func mustNewHTTPClient(lg *zap.Logger) *http.Client {
 	transport, err := newHTTPTransport(grpcProxyCA, grpcProxyCert, grpcProxyKey)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -556,7 +533,7 @@ func newHTTPTransport(ca, cert, key string) (*http.Transport, error) {
 	tr := &http.Transport{}
 
 	if ca != "" && cert != "" && key != "" {
-		caCert, err := os.ReadFile(ca)
+		caCert, err := ioutil.ReadFile(ca)
 		if err != nil {
 			return nil, err
 		}
@@ -571,6 +548,7 @@ func newHTTPTransport(ca, cert, key string) (*http.Transport, error) {
 			Certificates: []tls.Certificate{keyPair},
 			RootCAs:      caPool,
 		}
+		tlsConfig.BuildNameToCertificate()
 		tr.TLSClientConfig = tlsConfig
 	} else if grpcProxyInsecureSkipTLSVerify {
 		tlsConfig := &tls.Config{InsecureSkipVerify: grpcProxyInsecureSkipTLSVerify}

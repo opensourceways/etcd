@@ -24,14 +24,13 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	v3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
-	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 // TestSTMConflict tests that conflicts are retried.
 func TestSTMConflict(t *testing.T) {
-	integration.BeforeTest(t)
+	BeforeTest(t)
 
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
+	clus := NewClusterV3(t, &ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	etcdc := clus.RandClient()
@@ -47,7 +46,7 @@ func TestSTMConflict(t *testing.T) {
 	for i := range keys {
 		curEtcdc := clus.RandClient()
 		srcKey := keys[i]
-		applyf := func(stm concurrency.STM) {
+		applyf := func(stm concurrency.STM) error {
 			src := stm.Get(srcKey)
 			// must be different key to avoid double-adding
 			dstKey := srcKey
@@ -59,21 +58,16 @@ func TestSTMConflict(t *testing.T) {
 			dstV, _ := strconv.ParseInt(dst, 10, 64)
 			if srcV == 0 {
 				// can't rand.Intn on 0, so skip this transaction
-				return
+				return nil
 			}
 			xfer := int64(rand.Intn(int(srcV)) / 2)
 			stm.Put(srcKey, fmt.Sprintf("%d", srcV-xfer))
 			stm.Put(dstKey, fmt.Sprintf("%d", dstV+xfer))
+			return nil
 		}
 		go func() {
 			iso := concurrency.WithIsolation(concurrency.RepeatableReads)
-			_, err := concurrency.NewSTM(curEtcdc,
-				func(stm concurrency.STM) error {
-					applyf(stm)
-					return nil
-				},
-				iso,
-			)
+			_, err := concurrency.NewSTM(curEtcdc, applyf, iso)
 			errc <- err
 		}()
 	}
@@ -102,9 +96,9 @@ func TestSTMConflict(t *testing.T) {
 
 // TestSTMPutNewKey confirms a STM put on a new key is visible after commit.
 func TestSTMPutNewKey(t *testing.T) {
-	integration.BeforeTest(t)
+	BeforeTest(t)
 
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	etcdc := clus.RandClient()
@@ -129,9 +123,9 @@ func TestSTMPutNewKey(t *testing.T) {
 
 // TestSTMAbort tests that an aborted txn does not modify any keys.
 func TestSTMAbort(t *testing.T) {
-	integration.BeforeTest(t)
+	BeforeTest(t)
 
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	etcdc := clus.RandClient()
@@ -160,9 +154,9 @@ func TestSTMAbort(t *testing.T) {
 
 // TestSTMSerialize tests that serialization is honored when serializable.
 func TestSTMSerialize(t *testing.T) {
-	integration.BeforeTest(t)
+	BeforeTest(t)
 
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
+	clus := NewClusterV3(t, &ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	etcdc := clus.RandClient()
@@ -179,7 +173,7 @@ func TestSTMSerialize(t *testing.T) {
 		defer close(updatec)
 		for i := 0; i < 5; i++ {
 			s := fmt.Sprintf("%d", i)
-			var ops []v3.Op
+			ops := []v3.Op{}
 			for _, k := range keys {
 				ops = append(ops, v3.OpPut(k, s))
 			}
@@ -195,7 +189,7 @@ func TestSTMSerialize(t *testing.T) {
 	for range updatec {
 		curEtcdc := clus.RandClient()
 		applyf := func(stm concurrency.STM) error {
-			var vs []string
+			vs := []string{}
 			for i := range keys {
 				vs = append(vs, stm.Get(keys[i]))
 			}
@@ -223,9 +217,9 @@ func TestSTMSerialize(t *testing.T) {
 // TestSTMApplyOnConcurrentDeletion ensures that concurrent key deletion
 // fails the first GET revision comparison within STM; trigger retry.
 func TestSTMApplyOnConcurrentDeletion(t *testing.T) {
-	integration.BeforeTest(t)
+	BeforeTest(t)
 
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	etcdc := clus.RandClient()
@@ -272,9 +266,9 @@ func TestSTMApplyOnConcurrentDeletion(t *testing.T) {
 }
 
 func TestSTMSerializableSnapshotPut(t *testing.T) {
-	integration.BeforeTest(t)
+	BeforeTest(t)
 
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	cli := clus.Client(0)

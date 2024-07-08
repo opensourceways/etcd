@@ -15,6 +15,7 @@
 package fileutil
 
 import (
+	"io/ioutil"
 	"os"
 	"testing"
 )
@@ -62,9 +63,13 @@ func testPreallocateFixed(t *testing.T, f *os.File) {
 }
 
 func runPreallocTest(t *testing.T, test func(*testing.T, *os.File)) {
-	p := t.TempDir()
+	p, err := ioutil.TempDir(os.TempDir(), "preallocateTest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(p)
 
-	f, err := os.CreateTemp(p, "")
+	f, err := ioutil.TempFile(p, "")
 	if err != nil {
 		t.Fatal(err)
 	}

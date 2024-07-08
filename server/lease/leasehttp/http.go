@@ -19,7 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"net/http"
 	"time"
 
@@ -53,7 +53,7 @@ func (h *leaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer r.Body.Close()
-	b, err := io.ReadAll(r.Body)
+	b, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "error reading body", http.StatusBadRequest)
 		return
@@ -167,7 +167,7 @@ func RenewHTTP(ctx context.Context, id lease.LeaseID, url string, rt http.RoundT
 			return http.ErrUseLastResponse
 		},
 	}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(lreq))
+	req, err := http.NewRequest("POST", url, bytes.NewReader(lreq))
 	if err != nil {
 		return -1, err
 	}
@@ -192,12 +192,12 @@ func RenewHTTP(ctx context.Context, id lease.LeaseID, url string, rt http.RoundT
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return -1, fmt.Errorf("lease: unknown error(%s)", b)
+		return -1, fmt.Errorf("lease: unknown error(%s)", string(b))
 	}
 
 	lresp := &pb.LeaseKeepAliveResponse{}
 	if err := lresp.Unmarshal(b); err != nil {
-		return -1, fmt.Errorf(`lease: %v. data = "%s"`, err, b)
+		return -1, fmt.Errorf(`lease: %v. data = "%s"`, err, string(b))
 	}
 	if lresp.ID != int64(id) {
 		return -1, fmt.Errorf("lease: renew id mismatch")
@@ -218,7 +218,7 @@ func TimeToLiveHTTP(ctx context.Context, id lease.LeaseID, keys bool, url string
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(lreq))
+	req, err := http.NewRequest("POST", url, bytes.NewReader(lreq))
 	if err != nil {
 		return nil, err
 	}
@@ -257,13 +257,13 @@ func TimeToLiveHTTP(ctx context.Context, id lease.LeaseID, keys bool, url string
 		return nil, fmt.Errorf(`lease: %v. data = "%s"`, err, string(b))
 	}
 	if lresp.LeaseTimeToLiveResponse.ID != int64(id) {
-		return nil, fmt.Errorf("lease: TTL id mismatch")
+		return nil, fmt.Errorf("lease: renew id mismatch")
 	}
 	return lresp, nil
 }
 
 func readResponse(resp *http.Response) (b []byte, err error) {
-	b, err = io.ReadAll(resp.Body)
+	b, err = ioutil.ReadAll(resp.Body)
 	httputil.GracefulClose(resp)
 	return
 }

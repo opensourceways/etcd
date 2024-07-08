@@ -19,9 +19,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jonboulle/clockwork"
-
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v2error"
+
+	"github.com/jonboulle/clockwork"
 )
 
 // explanations of Compare function result

@@ -18,7 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -26,9 +26,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreos/go-semver/semver"
-	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap"
 
+	"github.com/coreos/go-semver/semver"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/client/pkg/v3/types"
@@ -46,12 +46,12 @@ type fakeCluster struct {
 func (c *fakeCluster) ID() types.ID         { return types.ID(c.id) }
 func (c *fakeCluster) ClientURLs() []string { return c.clientURLs }
 func (c *fakeCluster) Members() []*membership.Member {
-	ms := make(membership.MembersByID, 0, len(c.members))
+	var ms membership.MembersByID
 	for _, m := range c.members {
 		ms = append(ms, m)
 	}
 	sort.Sort(ms)
-	return ms
+	return []*membership.Member(ms)
 }
 func (c *fakeCluster) Member(id types.ID) *membership.Member { return c.members[uint64(id)] }
 func (c *fakeCluster) Version() *semver.Version              { return nil }
@@ -74,7 +74,6 @@ func (s *fakeServer) PromoteMember(ctx context.Context, id uint64) ([]*membershi
 	return nil, fmt.Errorf("PromoteMember not implemented in fakeServer")
 }
 func (s *fakeServer) ClusterVersion() *semver.Version      { return nil }
-func (s *fakeServer) StorageVersion() *semver.Version      { return nil }
 func (s *fakeServer) Cluster() api.Cluster                 { return s.cluster }
 func (s *fakeServer) Alarms() []*pb.AlarmMember            { return s.alarms }
 func (s *fakeServer) LeaderChangedNotify() <-chan struct{} { return nil }
@@ -86,7 +85,7 @@ var fakeRaftHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Reque
 // TestNewPeerHandlerOnRaftPrefix tests that NewPeerHandler returns a handler that
 // handles raft-prefix requests well.
 func TestNewPeerHandlerOnRaftPrefix(t *testing.T) {
-	ph := newPeerHandler(zaptest.NewLogger(t), &fakeServer{cluster: &fakeCluster{}}, fakeRaftHandler, nil, nil, nil)
+	ph := newPeerHandler(zap.NewExample(), &fakeServer{cluster: &fakeCluster{}}, fakeRaftHandler, nil, nil, nil)
 	srv := httptest.NewServer(ph)
 	defer srv.Close()
 
@@ -99,11 +98,10 @@ func TestNewPeerHandlerOnRaftPrefix(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected http.Get error: %v", err)
 		}
-		body, err := io.ReadAll(resp.Body)
+		body, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
-			t.Fatalf("unexpected io.ReadAll error: %v", err)
+			t.Fatalf("unexpected ioutil.ReadAll error: %v", err)
 		}
-		resp.Body.Close()
 		if w := "test data"; string(body) != w {
 			t.Errorf("#%d: body = %s, want %s", i, body, w)
 		}
@@ -235,7 +233,7 @@ func TestServeMemberPromoteFails(t *testing.T) {
 
 // TestNewPeerHandlerOnMembersPromotePrefix verifies the request with members promote prefix is routed correctly
 func TestNewPeerHandlerOnMembersPromotePrefix(t *testing.T) {
-	ph := newPeerHandler(zaptest.NewLogger(t), &fakeServer{cluster: &fakeCluster{}}, fakeRaftHandler, nil, nil, nil)
+	ph := newPeerHandler(zap.NewExample(), &fakeServer{cluster: &fakeCluster{}}, fakeRaftHandler, nil, nil, nil)
 	srv := httptest.NewServer(ph)
 	defer srv.Close()
 
@@ -269,16 +267,16 @@ func TestNewPeerHandlerOnMembersPromotePrefix(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to get http response: %v", err)
 		}
-		body, err := io.ReadAll(resp.Body)
+		body, err := ioutil.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			t.Fatalf("unexpected io.ReadAll error: %v", err)
+			t.Fatalf("unexpected ioutil.ReadAll error: %v", err)
 		}
 		if resp.StatusCode != tt.wcode {
 			t.Fatalf("#%d: code = %d, want %d", i, resp.StatusCode, tt.wcode)
 		}
 		if tt.checkBody && strings.Contains(string(body), tt.wKeyWords) {
-			t.Errorf("#%d: body: %s, want body to contain keywords: %s", i, body, tt.wKeyWords)
+			t.Errorf("#%d: body: %s, want body to contain keywords: %s", i, string(body), tt.wKeyWords)
 		}
 	}
 }

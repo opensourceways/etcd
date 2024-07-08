@@ -87,7 +87,7 @@ func TestNewUniqueURLsWithExceptions(t *testing.T) {
 	for i := range tests {
 		uv := NewUniqueURLsWithExceptions(tests[i].s, tests[i].exception)
 		require.Equal(t, tests[i].exp, uv.Values)
-		require.Equal(t, tests[i].rs, uv.String())
+		require.Equal(t, uv.String(), tests[i].rs)
 	}
 }
 

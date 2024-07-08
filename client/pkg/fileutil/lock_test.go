@@ -15,13 +15,14 @@
 package fileutil
 
 import (
+	"io/ioutil"
 	"os"
 	"testing"
 	"time"
 )
 
 func TestLockAndUnlock(t *testing.T) {
-	f, err := os.CreateTemp("", "lock")
+	f, err := ioutil.TempFile("", "lock")
 	if err != nil {
 		t.Fatal(err)
 	}

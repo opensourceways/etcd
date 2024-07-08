@@ -16,7 +16,6 @@ package clientv3
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,23 +23,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coreos/go-semver/semver"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
-	"google.golang.org/grpc"
-
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
+
+	"google.golang.org/grpc"
 )
 
 func NewClient(t *testing.T, cfg Config) (*Client, error) {
-	if cfg.Logger == nil {
-		cfg.Logger = zaptest.NewLogger(t).Named("client")
-	}
+	cfg.Logger = zaptest.NewLogger(t)
 	return New(cfg)
 }
 
@@ -119,14 +112,14 @@ func TestDialTimeout(t *testing.T) {
 
 	for i, cfg := range testCfgs {
 		donec := make(chan error, 1)
-		go func(cfg Config, i int) {
+		go func(cfg Config) {
 			// without timeout, dial continues forever on ipv4 black hole
 			c, err := NewClient(t, cfg)
 			if c != nil || err == nil {
 				t.Errorf("#%d: new client should fail", i)
 			}
 			donec <- err
-		}(cfg, i)
+		}(cfg)
 
 		time.Sleep(10 * time.Millisecond)
 
@@ -163,11 +156,14 @@ func TestMaxUnaryRetries(t *testing.T) {
 		MaxUnaryRetries: maxUnaryRetries,
 	}
 	c, err := NewClient(t, cfg)
-	require.NoError(t, err)
-	require.NotNil(t, c)
+	if c == nil || err != nil {
+		t.Fatalf("new client with MaxUnaryRetries should succeed, got %v", err)
+	}
 	defer c.Close()
 
-	require.Equal(t, maxUnaryRetries, c.cfg.MaxUnaryRetries)
+	if c.cfg.MaxUnaryRetries != maxUnaryRetries {
+		t.Fatalf("client MaxUnaryRetries should be %d, got %d", maxUnaryRetries, c.cfg.MaxUnaryRetries)
+	}
 }
 
 func TestBackoff(t *testing.T) {
@@ -177,11 +173,14 @@ func TestBackoff(t *testing.T) {
 		BackoffWaitBetween: backoffWaitBetween,
 	}
 	c, err := NewClient(t, cfg)
-	require.NoError(t, err)
-	require.NotNil(t, c)
+	if c == nil || err != nil {
+		t.Fatalf("new client with BackoffWaitBetween should succeed, got %v", err)
+	}
 	defer c.Close()
 
-	require.Equal(t, backoffWaitBetween, c.cfg.BackoffWaitBetween)
+	if c.cfg.BackoffWaitBetween != backoffWaitBetween {
+		t.Fatalf("client BackoffWaitBetween should be %v, got %v", backoffWaitBetween, c.cfg.BackoffWaitBetween)
+	}
 }
 
 func TestBackoffJitterFraction(t *testing.T) {
@@ -191,71 +190,34 @@ func TestBackoffJitterFraction(t *testing.T) {
 		BackoffJitterFraction: backoffJitterFraction,
 	}
 	c, err := NewClient(t, cfg)
-	require.NoError(t, err)
-	require.NotNil(t, c)
+	if c == nil || err != nil {
+		t.Fatalf("new client with BackoffJitterFraction should succeed, got %v", err)
+	}
 	defer c.Close()
 
-	require.Equal(t, backoffJitterFraction, c.cfg.BackoffJitterFraction)
+	if c.cfg.BackoffJitterFraction != backoffJitterFraction {
+		t.Fatalf("client BackoffJitterFraction should be %v, got %v", backoffJitterFraction, c.cfg.BackoffJitterFraction)
+	}
 }
 
 func TestIsHaltErr(t *testing.T) {
-	assert.Equal(t,
-		isHaltErr(context.TODO(), errors.New("etcdserver: some etcdserver error")),
-		true,
-		"error created by errors.New should be unavailable error",
-	)
-	assert.Equal(t,
-		isHaltErr(context.TODO(), rpctypes.ErrGRPCStopped),
-		false,
-		fmt.Sprintf(`error "%v" should not be halt error`, rpctypes.ErrGRPCStopped),
-	)
-	assert.Equal(t,
-		isHaltErr(context.TODO(), rpctypes.ErrGRPCNoLeader),
-		false,
-		fmt.Sprintf(`error "%v" should not be halt error`, rpctypes.ErrGRPCNoLeader),
-	)
+	if !isHaltErr(context.TODO(), fmt.Errorf("etcdserver: some etcdserver error")) {
+		t.Errorf(`error prefixed with "etcdserver: " should be Halted by default`)
+	}
+	if isHaltErr(context.TODO(), rpctypes.ErrGRPCStopped) {
+		t.Errorf("error %v should not halt", rpctypes.ErrGRPCStopped)
+	}
+	if isHaltErr(context.TODO(), rpctypes.ErrGRPCNoLeader) {
+		t.Errorf("error %v should not halt", rpctypes.ErrGRPCNoLeader)
+	}
 	ctx, cancel := context.WithCancel(context.TODO())
-	assert.Equal(t,
-		isHaltErr(ctx, nil),
-		false,
-		"no error and active context should be halt error",
-	)
+	if isHaltErr(ctx, nil) {
+		t.Errorf("no error and active context should not be Halted")
+	}
 	cancel()
-	assert.Equal(t,
-		isHaltErr(ctx, nil),
-		true,
-		"cancel on context should be halte error",
-	)
-}
-
-func TestIsUnavailableErr(t *testing.T) {
-	assert.Equal(t,
-		isUnavailableErr(context.TODO(), errors.New("etcdserver: some etcdserver error")),
-		false,
-		"error created by errors.New should not be unavailable error",
-	)
-	assert.Equal(t,
-		isUnavailableErr(context.TODO(), rpctypes.ErrGRPCStopped),
-		true,
-		fmt.Sprintf(`error "%v" should be unavailable error`, rpctypes.ErrGRPCStopped),
-	)
-	assert.Equal(t,
-		isUnavailableErr(context.TODO(), rpctypes.ErrGRPCNotCapable),
-		false,
-		fmt.Sprintf("error %v should not be unavailable error", rpctypes.ErrGRPCNotCapable),
-	)
-	ctx, cancel := context.WithCancel(context.TODO())
-	assert.Equal(t,
-		isUnavailableErr(ctx, nil),
-		false,
-		"no error and active context should not be unavailable error",
-	)
-	cancel()
-	assert.Equal(t,
-		isUnavailableErr(ctx, nil),
-		false,
-		"cancel on context should not be unavailable error",
-	)
+	if !isHaltErr(ctx, nil) {
+		t.Errorf("cancel on context should be Halted")
+	}
 }
 
 func TestCloseCtxClient(t *testing.T) {
@@ -292,18 +254,13 @@ func TestZapWithLogger(t *testing.T) {
 }
 
 func TestAuthTokenBundleNoOverwrite(t *testing.T) {
-	// This call in particular changes working directory to the tmp dir of
-	// the test. The `etcd-auth-test:0` can be created in local directory,
-	// not exceeding the longest allowed path on OsX.
-	testutil.BeforeTest(t)
-
 	// Create a mock AuthServer to handle Authenticate RPCs.
 	lis, err := net.Listen("unix", "etcd-auth-test:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer lis.Close()
-	addr := "unix://" + lis.Addr().String()
+	addr := "unix:" + lis.Addr().String()
 	srv := grpc.NewServer()
 	etcdserverpb.RegisterAuthServer(srv, mockAuthServer{})
 	go srv.Serve(lis)
@@ -337,6 +294,14 @@ func TestAuthTokenBundleNoOverwrite(t *testing.T) {
 	}
 }
 
+type mockAuthServer struct {
+	*etcdserverpb.UnimplementedAuthServer
+}
+
+func (mockAuthServer) Authenticate(context.Context, *etcdserverpb.AuthenticateRequest) (*etcdserverpb.AuthenticateResponse, error) {
+	return &etcdserverpb.AuthenticateResponse{Token: "mock-token"}, nil
+}
+
 func TestSyncFiltersMembers(t *testing.T) {
 	c, _ := NewClient(t, Config{Endpoints: []string{"http://254.0.0.1:12345"}})
 	defer c.Close()
@@ -355,49 +320,36 @@ func TestSyncFiltersMembers(t *testing.T) {
 	}
 }
 
-func TestMinSupportedVersion(t *testing.T) {
-	testutil.BeforeTest(t)
-	var tests = []struct {
-		name                string
-		currentVersion      semver.Version
-		minSupportedVersion semver.Version
-	}{
-		{
-			name:                "v3.6 client should accept v3.5",
-			currentVersion:      version.V3_6,
-			minSupportedVersion: version.V3_5,
-		},
-		{
-			name:                "v3.7 client should accept v3.6",
-			currentVersion:      version.V3_7,
-			minSupportedVersion: version.V3_6,
-		},
-		{
-			name:                "first minor version should accept its previous version",
-			currentVersion:      version.V4_0,
-			minSupportedVersion: version.V3_7,
-		},
-		{
-			name:                "first version in list should not accept previous versions",
-			currentVersion:      version.V3_0,
-			minSupportedVersion: version.V3_0,
-		},
-	}
+type mockCluster struct {
+	members []*etcdserverpb.Member
+}
 
-	versionBackup := version.Version
-	t.Cleanup(func() {
-		version.Version = versionBackup
-	})
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			version.Version = tt.currentVersion.String()
-			require.True(t, minSupportedVersion().Equal(tt.minSupportedVersion))
-		})
-	}
+func (mc *mockCluster) MemberList(ctx context.Context) (*MemberListResponse, error) {
+	return &MemberListResponse{Members: mc.members}, nil
+}
+
+func (mc *mockCluster) MemberAdd(ctx context.Context, peerAddrs []string) (*MemberAddResponse, error) {
+	return nil, nil
+}
+
+func (mc *mockCluster) MemberAddAsLearner(ctx context.Context, peerAddrs []string) (*MemberAddResponse, error) {
+	return nil, nil
+}
+
+func (mc *mockCluster) MemberRemove(ctx context.Context, id uint64) (*MemberRemoveResponse, error) {
+	return nil, nil
+}
+
+func (mc *mockCluster) MemberUpdate(ctx context.Context, id uint64, peerAddrs []string) (*MemberUpdateResponse, error) {
+	return nil, nil
+}
+
+func (mc *mockCluster) MemberPromote(ctx context.Context, id uint64) (*MemberPromoteResponse, error) {
+	return nil, nil
 }
 
 func TestClientRejectOldCluster(t *testing.T) {
-	testutil.BeforeTest(t)
+	testutil.RegisterLeakDetection(t)
 	var tests = []struct {
 		name          string
 		endpoints     []string
@@ -407,13 +359,13 @@ func TestClientRejectOldCluster(t *testing.T) {
 		{
 			name:          "all new versions with the same value",
 			endpoints:     []string{"192.168.3.41:22379", "192.168.3.41:22479", "192.168.3.41:22579"},
-			versions:      []string{version.Version, version.Version, version.Version},
+			versions:      []string{"3.5.4", "3.5.4", "3.5.4"},
 			expectedError: nil,
 		},
 		{
 			name:          "all new versions with different values",
 			endpoints:     []string{"192.168.3.41:22379", "192.168.3.41:22479", "192.168.3.41:22579"},
-			versions:      []string{version.Version, minSupportedVersion().String(), minSupportedVersion().String()},
+			versions:      []string{"3.5.4", "3.5.4", "3.4.0"},
 			expectedError: nil,
 		},
 		{
@@ -441,9 +393,11 @@ func TestClientRejectOldCluster(t *testing.T) {
 				endpointToVersion[tt.endpoints[j]] = tt.versions[j]
 			}
 			c := &Client{
-				ctx:       context.Background(),
-				endpoints: tt.endpoints,
-				epMu:      new(sync.RWMutex),
+				ctx: context.Background(),
+				cfg: Config{
+					Endpoints: tt.endpoints,
+				},
+				mu: new(sync.RWMutex),
 				Maintenance: &mockMaintenance{
 					Version: endpointToVersion,
 				},
@@ -482,54 +436,10 @@ func (mm mockMaintenance) HashKV(ctx context.Context, endpoint string, rev int64
 	return nil, nil
 }
 
-func (mm mockMaintenance) SnapshotWithVersion(ctx context.Context) (*SnapshotResponse, error) {
-	return nil, nil
-}
-
 func (mm mockMaintenance) Snapshot(ctx context.Context) (io.ReadCloser, error) {
 	return nil, nil
 }
 
 func (mm mockMaintenance) MoveLeader(ctx context.Context, transfereeID uint64) (*MoveLeaderResponse, error) {
-	return nil, nil
-}
-
-func (mm mockMaintenance) Downgrade(ctx context.Context, action DowngradeAction, version string) (*DowngradeResponse, error) {
-	return nil, nil
-}
-
-type mockAuthServer struct {
-	*etcdserverpb.UnimplementedAuthServer
-}
-
-func (mockAuthServer) Authenticate(context.Context, *etcdserverpb.AuthenticateRequest) (*etcdserverpb.AuthenticateResponse, error) {
-	return &etcdserverpb.AuthenticateResponse{Token: "mock-token"}, nil
-}
-
-type mockCluster struct {
-	members []*etcdserverpb.Member
-}
-
-func (mc *mockCluster) MemberList(ctx context.Context, opts ...OpOption) (*MemberListResponse, error) {
-	return &MemberListResponse{Members: mc.members}, nil
-}
-
-func (mc *mockCluster) MemberAdd(ctx context.Context, peerAddrs []string) (*MemberAddResponse, error) {
-	return nil, nil
-}
-
-func (mc *mockCluster) MemberAddAsLearner(ctx context.Context, peerAddrs []string) (*MemberAddResponse, error) {
-	return nil, nil
-}
-
-func (mc *mockCluster) MemberRemove(ctx context.Context, id uint64) (*MemberRemoveResponse, error) {
-	return nil, nil
-}
-
-func (mc *mockCluster) MemberUpdate(ctx context.Context, id uint64, peerAddrs []string) (*MemberUpdateResponse, error) {
-	return nil, nil
-}
-
-func (mc *mockCluster) MemberPromote(ctx context.Context, id uint64) (*MemberPromoteResponse, error) {
 	return nil, nil
 }

@@ -27,16 +27,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 
+	"go.etcd.io/etcd/server/v3/lease"
+
+	"github.com/stretchr/testify/assert"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/client/pkg/v3/types"
-	"go.etcd.io/etcd/server/v3/lease"
-	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
-	"go.etcd.io/etcd/server/v3/storage/mvcc"
+	"go.etcd.io/etcd/server/v3/mvcc"
+	betesting "go.etcd.io/etcd/server/v3/mvcc/backend/testing"
+	"go.uber.org/zap/zaptest"
 )
 
 func TestInitialCheck(t *testing.T) {
@@ -50,58 +51,58 @@ func TestInitialCheck(t *testing.T) {
 		{
 			name: "No peers",
 			hasher: fakeHasher{
-				hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Revision: 10}}},
+				hashByRevResponses: []hashByRev{{revision: 10}},
 			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(10)", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(10)", "MemberId()"},
 		},
 		{
 			name:          "Error getting hash",
 			hasher:        fakeHasher{hashByRevResponses: []hashByRev{{err: fmt.Errorf("error getting hash")}}},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "HashByRev(0)", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "HashByRev(0)", "MemberId()"},
 			expectError:   true,
 		},
 		{
 			name:          "Peer with empty response",
 			hasher:        fakeHasher{peerHashes: []*peerHashKVResp{{}}},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberId()"},
 		},
 		{
 			name:          "Peer returned ErrFutureRev",
 			hasher:        fakeHasher{peerHashes: []*peerHashKVResp{{err: rpctypes.ErrFutureRev}}},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberID()", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberId()", "MemberId()"},
 		},
 		{
 			name:          "Peer returned ErrCompacted",
 			hasher:        fakeHasher{peerHashes: []*peerHashKVResp{{err: rpctypes.ErrCompacted}}},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberID()", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberId()", "MemberId()"},
 		},
 		{
 			name:          "Peer returned other error",
 			hasher:        fakeHasher{peerHashes: []*peerHashKVResp{{err: rpctypes.ErrCorrupt}}},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberId()"},
 		},
 		{
 			name:          "Peer returned same hash",
 			hasher:        fakeHasher{hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Hash: 1}}}, peerHashes: []*peerHashKVResp{{resp: &pb.HashKVResponse{Header: &pb.ResponseHeader{}, Hash: 1}}}},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberID()", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberId()", "MemberId()"},
 		},
 		{
 			name:          "Peer returned different hash with same compaction rev",
 			hasher:        fakeHasher{hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Hash: 1, CompactRevision: 1}}}, peerHashes: []*peerHashKVResp{{resp: &pb.HashKVResponse{Header: &pb.ResponseHeader{}, Hash: 2, CompactRevision: 1}}}},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberID()", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberId()", "MemberId()"},
 			expectError:   true,
 		},
 		{
 			name:          "Peer returned different hash and compaction rev",
 			hasher:        fakeHasher{hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Hash: 1, CompactRevision: 1}}}, peerHashes: []*peerHashKVResp{{resp: &pb.HashKVResponse{Header: &pb.ResponseHeader{}, Hash: 2, CompactRevision: 2}}}},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberID()", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberId()", "MemberId()"},
 		},
 		{
 			name: "Cluster ID Mismatch does not fail CorruptionChecker.InitialCheck()",
 			hasher: fakeHasher{
-				peerHashes: []*peerHashKVResp{{err: rpctypes.ErrClusterIDMismatch}},
+				peerHashes: []*peerHashKVResp{{err: rpctypes.ErrClusterIdMismatch}},
 			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberID()", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "HashByRev(0)", "PeerHashByRev(0)", "MemberId()", "MemberId()"},
 		},
 	}
 	for _, tc := range tcs {
@@ -132,7 +133,7 @@ func TestPeriodicCheck(t *testing.T) {
 	}{
 		{
 			name:          "Same local hash and no peers",
-			hasher:        fakeHasher{hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Revision: 10}}, {hash: mvcc.KeyValueHash{Revision: 10}}}},
+			hasher:        fakeHasher{hashByRevResponses: []hashByRev{{revision: 10}, {revision: 10}}},
 			expectActions: []string{"HashByRev(0)", "PeerHashByRev(10)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)"},
 		},
 		{
@@ -143,7 +144,7 @@ func TestPeriodicCheck(t *testing.T) {
 		},
 		{
 			name:          "Error getting hash second time",
-			hasher:        fakeHasher{hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Revision: 11}}, {err: fmt.Errorf("error getting hash")}}},
+			hasher:        fakeHasher{hashByRevResponses: []hashByRev{{revision: 11}, {err: fmt.Errorf("error getting hash")}}},
 			expectActions: []string{"HashByRev(0)", "PeerHashByRev(11)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)"},
 			expectError:   true,
 		},
@@ -155,7 +156,7 @@ func TestPeriodicCheck(t *testing.T) {
 		},
 		{
 			name:          "Different local hash and revision",
-			hasher:        fakeHasher{hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Hash: 1, Revision: 1}, revision: 1}, {hash: mvcc.KeyValueHash{Hash: 2}, revision: 2}}},
+			hasher:        fakeHasher{hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Hash: 1}, revision: 1}, {hash: mvcc.KeyValueHash{Hash: 2}, revision: 2}}},
 			expectActions: []string{"HashByRev(0)", "PeerHashByRev(1)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)"},
 		},
 		{
@@ -165,8 +166,8 @@ func TestPeriodicCheck(t *testing.T) {
 		},
 		{
 			name:          "Different local hash and same revisions",
-			hasher:        fakeHasher{hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Hash: 1, CompactRevision: 1, Revision: 1}, revision: 1}, {hash: mvcc.KeyValueHash{Hash: 2, CompactRevision: 1, Revision: 1}, revision: 1}}},
-			expectActions: []string{"HashByRev(0)", "PeerHashByRev(1)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)", "MemberID()", "TriggerCorruptAlarm(1)"},
+			hasher:        fakeHasher{hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Hash: 1, CompactRevision: 1}, revision: 1}, {hash: mvcc.KeyValueHash{Hash: 2, CompactRevision: 1}, revision: 1}}},
+			expectActions: []string{"HashByRev(0)", "PeerHashByRev(1)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)", "MemberId()", "TriggerCorruptAlarm(0)"},
 			expectCorrupt: true,
 		},
 		{
@@ -181,7 +182,7 @@ func TestPeriodicCheck(t *testing.T) {
 			hasher: fakeHasher{
 				peerHashes: []*peerHashKVResp{{peerInfo: peerInfo{id: 42}, resp: &pb.HashKVResponse{Header: &pb.ResponseHeader{Revision: 1}}}},
 			},
-			expectActions: []string{"HashByRev(0)", "PeerHashByRev(0)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)", "TriggerCorruptAlarm(42)"},
+			expectActions: []string{"HashByRev(0)", "PeerHashByRev(0)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)", "TriggerCorruptAlarm(0)"},
 			expectCorrupt: true,
 		},
 		{
@@ -189,13 +190,13 @@ func TestPeriodicCheck(t *testing.T) {
 			hasher: fakeHasher{
 				peerHashes: []*peerHashKVResp{{peerInfo: peerInfo{id: 88}, resp: &pb.HashKVResponse{Header: &pb.ResponseHeader{Revision: 10}, CompactRevision: 2}}},
 			},
-			expectActions: []string{"HashByRev(0)", "PeerHashByRev(0)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)", "TriggerCorruptAlarm(88)"},
+			expectActions: []string{"HashByRev(0)", "PeerHashByRev(0)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)", "TriggerCorruptAlarm(0)"},
 			expectCorrupt: true,
 		},
 		{
 			name: "Peer with same hash and compact revision",
 			hasher: fakeHasher{
-				hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Hash: 1, CompactRevision: 1, Revision: 1}, revision: 1}, {hash: mvcc.KeyValueHash{Hash: 2, CompactRevision: 2, Revision: 2}, revision: 2}},
+				hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Hash: 1, CompactRevision: 1}, revision: 1}, {hash: mvcc.KeyValueHash{Hash: 2, CompactRevision: 2}, revision: 2}},
 				peerHashes:         []*peerHashKVResp{{resp: &pb.HashKVResponse{Header: &pb.ResponseHeader{Revision: 1}, CompactRevision: 1, Hash: 1}}},
 			},
 			expectActions: []string{"HashByRev(0)", "PeerHashByRev(1)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)"},
@@ -203,10 +204,10 @@ func TestPeriodicCheck(t *testing.T) {
 		{
 			name: "Peer with different hash and same compact revision as first local",
 			hasher: fakeHasher{
-				hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Hash: 1, CompactRevision: 1, Revision: 1}, revision: 1}, {hash: mvcc.KeyValueHash{Hash: 2, CompactRevision: 2}, revision: 2}},
+				hashByRevResponses: []hashByRev{{hash: mvcc.KeyValueHash{Hash: 1, CompactRevision: 1}, revision: 1}, {hash: mvcc.KeyValueHash{Hash: 2, CompactRevision: 2}, revision: 2}},
 				peerHashes:         []*peerHashKVResp{{peerInfo: peerInfo{id: 666}, resp: &pb.HashKVResponse{Header: &pb.ResponseHeader{Revision: 1}, CompactRevision: 1, Hash: 2}}},
 			},
-			expectActions: []string{"HashByRev(0)", "PeerHashByRev(1)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)", "TriggerCorruptAlarm(666)"},
+			expectActions: []string{"HashByRev(0)", "PeerHashByRev(1)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)", "TriggerCorruptAlarm(0)"},
 			expectCorrupt: true,
 		},
 		{
@@ -217,13 +218,13 @@ func TestPeriodicCheck(t *testing.T) {
 					{peerInfo: peerInfo{id: 89}, resp: &pb.HashKVResponse{Header: &pb.ResponseHeader{Revision: 10}, CompactRevision: 2}},
 				},
 			},
-			expectActions: []string{"HashByRev(0)", "PeerHashByRev(0)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)", "TriggerCorruptAlarm(88)"},
+			expectActions: []string{"HashByRev(0)", "PeerHashByRev(0)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)", "TriggerCorruptAlarm(0)"},
 			expectCorrupt: true,
 		},
 		{
 			name: "Cluster ID Mismatch does not fail CorruptionChecker.PeriodicCheck()",
 			hasher: fakeHasher{
-				peerHashes: []*peerHashKVResp{{err: rpctypes.ErrClusterIDMismatch}},
+				peerHashes: []*peerHashKVResp{{err: rpctypes.ErrClusterIdMismatch}},
 			},
 			expectActions: []string{"HashByRev(0)", "PeerHashByRev(0)", "ReqTimeout()", "LinearizableReadNotify()", "HashByRev(0)"},
 		},
@@ -259,7 +260,7 @@ func TestCompactHashCheck(t *testing.T) {
 	}{
 		{
 			name:          "No hashes",
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "Hashes()"},
 		},
 		{
 			name: "No peers, check new checked from largest to smallest",
@@ -267,7 +268,7 @@ func TestCompactHashCheck(t *testing.T) {
 				hashes: []mvcc.KeyValueHash{{Revision: 1}, {Revision: 2}, {Revision: 3}, {Revision: 4}},
 			},
 			lastRevisionChecked:       2,
-			expectActions:             []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(4)", "PeerHashByRev(3)"},
+			expectActions:             []string{"MemberId()", "ReqTimeout()", "Hashes()", "PeerHashByRev(4)", "PeerHashByRev(3)"},
 			expectLastRevisionChecked: 2,
 		},
 		{
@@ -276,7 +277,7 @@ func TestCompactHashCheck(t *testing.T) {
 				hashes:     []mvcc.KeyValueHash{{Revision: 1}, {Revision: 2}},
 				peerHashes: []*peerHashKVResp{{err: fmt.Errorf("failed getting hash")}},
 			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "MemberID()", "PeerHashByRev(1)", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "PeerHashByRev(1)"},
 		},
 		{
 			name: "Peer returned different compaction revision is skipped",
@@ -284,112 +285,15 @@ func TestCompactHashCheck(t *testing.T) {
 				hashes:     []mvcc.KeyValueHash{{Revision: 1, CompactRevision: 1}, {Revision: 2, CompactRevision: 2}},
 				peerHashes: []*peerHashKVResp{{resp: &pb.HashKVResponse{CompactRevision: 3}}},
 			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "MemberID()", "PeerHashByRev(1)", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "PeerHashByRev(1)"},
 		},
 		{
-			name: "Etcd can identify two corrupted members in 5 member cluster",
+			name: "Peer returned same compaction revision but different hash triggers alarm",
 			hasher: fakeHasher{
-				hashes: []mvcc.KeyValueHash{{Revision: 1, CompactRevision: 1, Hash: 1}, {Revision: 2, CompactRevision: 1, Hash: 2}},
-				peerHashes: []*peerHashKVResp{
-					{peerInfo: peerInfo{id: 42}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 2}},
-					{peerInfo: peerInfo{id: 43}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 2}},
-					{peerInfo: peerInfo{id: 44}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 7}},
-					{peerInfo: peerInfo{id: 45}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 7}},
-				},
+				hashes:     []mvcc.KeyValueHash{{Revision: 1, CompactRevision: 1, Hash: 1}, {Revision: 2, CompactRevision: 1, Hash: 2}},
+				peerHashes: []*peerHashKVResp{{peerInfo: peerInfo{id: 42}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 3}}},
 			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "MemberID()", "TriggerCorruptAlarm(44)", "TriggerCorruptAlarm(45)"},
-			expectCorrupt: true,
-		},
-		{
-			name: "Etcd checks next hash when one member is unresponsive in 3 member cluster",
-			hasher: fakeHasher{
-				hashes: []mvcc.KeyValueHash{{Revision: 1, CompactRevision: 1, Hash: 2}, {Revision: 2, CompactRevision: 1, Hash: 2}},
-				peerHashes: []*peerHashKVResp{
-					{err: fmt.Errorf("failed getting hash")},
-					{peerInfo: peerInfo{id: 43}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 2}},
-				},
-			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "MemberID()", "PeerHashByRev(1)", "MemberID()"},
-			expectCorrupt: false,
-		},
-		{
-			name: "Etcd can identify single corrupted member in 3 member cluster",
-			hasher: fakeHasher{
-				hashes: []mvcc.KeyValueHash{{Revision: 1, CompactRevision: 1, Hash: 2}, {Revision: 2, CompactRevision: 1, Hash: 2}},
-				peerHashes: []*peerHashKVResp{
-					{peerInfo: peerInfo{id: 42}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 2}},
-					{peerInfo: peerInfo{id: 43}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 3}},
-				},
-			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "MemberID()", "TriggerCorruptAlarm(43)"},
-			expectCorrupt: true,
-		},
-		{
-			name: "Etcd can identify single corrupted member in 5 member cluster",
-			hasher: fakeHasher{
-				hashes: []mvcc.KeyValueHash{{Revision: 1, CompactRevision: 1, Hash: 2}, {Revision: 2, CompactRevision: 1, Hash: 2}},
-				peerHashes: []*peerHashKVResp{
-					{peerInfo: peerInfo{id: 42}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 2}},
-					{peerInfo: peerInfo{id: 43}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 2}},
-					{peerInfo: peerInfo{id: 44}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 3}},
-					{peerInfo: peerInfo{id: 45}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 2}},
-				},
-			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "MemberID()", "TriggerCorruptAlarm(44)"},
-			expectCorrupt: true,
-		},
-		{
-			name: "Etcd triggers corrupted alarm on whole cluster if in 3 member cluster one member is down and one member corrupted",
-			hasher: fakeHasher{
-				hashes: []mvcc.KeyValueHash{{Revision: 1, CompactRevision: 1, Hash: 2}, {Revision: 2, CompactRevision: 1, Hash: 2}},
-				peerHashes: []*peerHashKVResp{
-					{err: fmt.Errorf("failed getting hash")},
-					{peerInfo: peerInfo{id: 43}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 3}},
-				},
-			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "MemberID()", "TriggerCorruptAlarm(0)"},
-			expectCorrupt: true,
-		},
-		{
-			name: "Etcd triggers corrupted alarm on whole cluster if no quorum in 5 member cluster",
-			hasher: fakeHasher{
-				hashes: []mvcc.KeyValueHash{{Revision: 1, CompactRevision: 1, Hash: 1}, {Revision: 2, CompactRevision: 1, Hash: 2}},
-				peerHashes: []*peerHashKVResp{
-					{peerInfo: peerInfo{id: 42}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 2}},
-					{peerInfo: peerInfo{id: 43}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 3}},
-					{peerInfo: peerInfo{id: 44}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 3}},
-					{peerInfo: peerInfo{id: 45}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 3}},
-					{peerInfo: peerInfo{id: 46}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 4}},
-					{peerInfo: peerInfo{id: 47}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 2}},
-				},
-			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "MemberID()", "TriggerCorruptAlarm(0)"},
-			expectCorrupt: true,
-		},
-		{
-			name: "Etcd can identify corrupted member in 5 member cluster even if one member is down",
-			hasher: fakeHasher{
-				hashes: []mvcc.KeyValueHash{{Revision: 1, CompactRevision: 1, Hash: 2}, {Revision: 2, CompactRevision: 1, Hash: 2}},
-				peerHashes: []*peerHashKVResp{
-					{peerInfo: peerInfo{id: 42}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 2}},
-					{err: fmt.Errorf("failed getting hash")},
-					{peerInfo: peerInfo{id: 44}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 3}},
-					{peerInfo: peerInfo{id: 45}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 2}},
-				},
-			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "MemberID()", "TriggerCorruptAlarm(44)"},
-			expectCorrupt: true,
-		},
-		{
-			name: "Etcd can identify that leader is corrupted",
-			hasher: fakeHasher{
-				hashes: []mvcc.KeyValueHash{{Revision: 1, CompactRevision: 1, Hash: 2}, {Revision: 2, CompactRevision: 1, Hash: 2}},
-				peerHashes: []*peerHashKVResp{
-					{peerInfo: peerInfo{id: 42}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 3}},
-					{peerInfo: peerInfo{id: 43}, resp: &pb.HashKVResponse{CompactRevision: 1, Hash: 3}},
-				},
-			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "MemberID()", "TriggerCorruptAlarm(1)"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "TriggerCorruptAlarm(0)"},
 			expectCorrupt: true,
 		},
 		{
@@ -398,7 +302,7 @@ func TestCompactHashCheck(t *testing.T) {
 				hashes:     []mvcc.KeyValueHash{{Revision: 1, CompactRevision: 1, Hash: 1}, {Revision: 2, CompactRevision: 1, Hash: 1}},
 				peerHashes: []*peerHashKVResp{{resp: &pb.HashKVResponse{Header: &pb.ResponseHeader{MemberId: 42}, CompactRevision: 1, Hash: 1}}},
 			},
-			expectActions:             []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)", "MemberID()"},
+			expectActions:             []string{"MemberId()", "ReqTimeout()", "Hashes()", "PeerHashByRev(2)"},
 			expectLastRevisionChecked: 2,
 		},
 		{
@@ -410,15 +314,15 @@ func TestCompactHashCheck(t *testing.T) {
 					{err: fmt.Errorf("failed getting hash")},
 				},
 			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(1)", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "Hashes()", "PeerHashByRev(1)"},
 		},
 		{
 			name: "Cluster ID Mismatch does not fail CorruptionChecker.CompactHashCheck()",
 			hasher: fakeHasher{
 				hashes:     []mvcc.KeyValueHash{{Revision: 1, CompactRevision: 1, Hash: 1}},
-				peerHashes: []*peerHashKVResp{{err: rpctypes.ErrClusterIDMismatch}},
+				peerHashes: []*peerHashKVResp{{err: rpctypes.ErrClusterIdMismatch}},
 			},
-			expectActions: []string{"MemberID()", "ReqTimeout()", "Hashes()", "PeerHashByRev(1)", "MemberID()"},
+			expectActions: []string{"MemberId()", "ReqTimeout()", "Hashes()", "PeerHashByRev(1)"},
 		},
 	}
 	for _, tc := range tcs {
@@ -486,8 +390,8 @@ func (f *fakeHasher) ReqTimeout() time.Duration {
 	return time.Second
 }
 
-func (f *fakeHasher) MemberID() types.ID {
-	f.actions = append(f.actions, "MemberID()")
+func (f *fakeHasher) MemberId() types.ID {
+	f.actions = append(f.actions, "MemberId()")
 	return 1
 }
 
@@ -501,8 +405,8 @@ func (f *fakeHasher) LinearizableReadNotify(ctx context.Context) error {
 	return f.linearizableReadNotify
 }
 
-func (f *fakeHasher) TriggerCorruptAlarm(memberID types.ID) {
-	f.actions = append(f.actions, fmt.Sprintf("TriggerCorruptAlarm(%d)", memberID))
+func (f *fakeHasher) TriggerCorruptAlarm(memberId types.ID) {
+	f.actions = append(f.actions, fmt.Sprintf("TriggerCorruptAlarm(%d)", memberId))
 	f.alarmTriggered = true
 }
 
@@ -512,7 +416,7 @@ func TestHashKVHandler(t *testing.T) {
 	var revision = 1
 
 	etcdSrv := &EtcdServer{}
-	etcdSrv.cluster = newTestCluster(t)
+	etcdSrv.cluster = newTestCluster(t, nil)
 	etcdSrv.cluster.SetID(types.ID(localClusterID), types.ID(localClusterID))
 	be, _ := betesting.NewDefaultTmpBackend(t)
 	defer betesting.Close(t, be)
@@ -573,7 +477,7 @@ func TestHashKVHandler(t *testing.T) {
 			}
 			if resp.StatusCode != http.StatusOK {
 				if !strings.Contains(string(body), tt.wKeyWords) {
-					t.Errorf("#%d: body: %s, want body to contain keywords: %s", i, body, tt.wKeyWords)
+					t.Errorf("#%d: body: %s, want body to contain keywords: %s", i, string(body), tt.wKeyWords)
 				}
 				return
 			}

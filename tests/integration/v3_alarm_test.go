@@ -16,39 +16,38 @@ package integration
 
 import (
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
-	"go.uber.org/zap/zaptest"
-
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/pkg/v3/traceutil"
 	"go.etcd.io/etcd/server/v3/lease/leasepb"
-	"go.etcd.io/etcd/server/v3/storage/backend"
-	"go.etcd.io/etcd/server/v3/storage/mvcc"
-	"go.etcd.io/etcd/server/v3/storage/schema"
-	"go.etcd.io/etcd/tests/v3/framework/integration"
+	"go.etcd.io/etcd/server/v3/mvcc"
+	"go.etcd.io/etcd/server/v3/mvcc/backend"
+	"go.etcd.io/etcd/server/v3/mvcc/buckets"
+	"go.uber.org/zap/zaptest"
 )
 
 // TestV3StorageQuotaApply tests the V3 server respects quotas during apply
 func TestV3StorageQuotaApply(t *testing.T) {
-	integration.BeforeTest(t)
+	BeforeTest(t)
 	quotasize := int64(16 * os.Getpagesize())
 
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 2})
+	clus := NewClusterV3(t, &ClusterConfig{Size: 2, UseBridge: true})
 	defer clus.Terminate(t)
-	kvc1 := integration.ToGRPC(clus.Client(1)).KV
+	kvc0 := toGRPC(clus.Client(0)).KV
+	kvc1 := toGRPC(clus.Client(1)).KV
 
 	// Set a quota on one node
 	clus.Members[0].QuotaBackendBytes = quotasize
 	clus.Members[0].Stop(t)
 	clus.Members[0].Restart(t)
-	clus.WaitMembersForLeader(t, clus.Members)
-	kvc0 := integration.ToGRPC(clus.Client(0)).KV
+	clus.waitLeader(t, clus.Members)
 	waitForRestart(t, kvc0)
 
 	key := []byte("abc")
@@ -77,7 +76,7 @@ func TestV3StorageQuotaApply(t *testing.T) {
 	stopc := time.After(5 * time.Second)
 	for {
 		req := &pb.AlarmRequest{Action: pb.AlarmRequest_GET}
-		resp, aerr := clus.Members[0].Server.Alarm(context.TODO(), req)
+		resp, aerr := clus.Members[0].s.Alarm(context.TODO(), req)
 		if aerr != nil {
 			t.Fatal(aerr)
 		}
@@ -115,7 +114,7 @@ func TestV3StorageQuotaApply(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.TODO(), integration.RequestWaitTimeout)
+	ctx, cancel := context.WithTimeout(context.TODO(), RequestWaitTimeout)
 	defer cancel()
 
 	// small quota machine should reject put
@@ -131,7 +130,7 @@ func TestV3StorageQuotaApply(t *testing.T) {
 	// reset large quota node to ensure alarm persisted
 	clus.Members[1].Stop(t)
 	clus.Members[1].Restart(t)
-	clus.WaitMembersForLeader(t, clus.Members)
+	clus.waitLeader(t, clus.Members)
 
 	if _, err := kvc1.Put(context.TODO(), &pb.PutRequest{Key: key, Value: smallbuf}); err == nil {
 		t.Fatalf("alarmed instance should reject put after reset")
@@ -140,12 +139,12 @@ func TestV3StorageQuotaApply(t *testing.T) {
 
 // TestV3AlarmDeactivate ensures that space alarms can be deactivated so puts go through.
 func TestV3AlarmDeactivate(t *testing.T) {
-	integration.BeforeTest(t)
+	BeforeTest(t)
 
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
+	clus := NewClusterV3(t, &ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
-	kvc := integration.ToGRPC(clus.RandClient()).KV
-	mt := integration.ToGRPC(clus.RandClient()).Maintenance
+	kvc := toGRPC(clus.RandClient()).KV
+	mt := toGRPC(clus.RandClient()).Maintenance
 
 	alarmReq := &pb.AlarmRequest{
 		MemberID: 123,
@@ -174,9 +173,8 @@ func TestV3AlarmDeactivate(t *testing.T) {
 }
 
 func TestV3CorruptAlarm(t *testing.T) {
-	integration.BeforeTest(t)
-	lg := zaptest.NewLogger(t)
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, UseBridge: true})
+	BeforeTest(t)
+	clus := NewClusterV3(t, &ClusterConfig{Size: 3, UseBridge: true})
 	defer clus.Terminate(t)
 
 	var wg sync.WaitGroup
@@ -194,8 +192,8 @@ func TestV3CorruptAlarm(t *testing.T) {
 	// Corrupt member 0 by modifying backend offline.
 	clus.Members[0].Stop(t)
 	fp := filepath.Join(clus.Members[0].DataDir, "member", "snap", "db")
-	be := backend.NewDefaultBackend(lg, fp)
-	s := mvcc.NewStore(lg, be, nil, mvcc.StoreConfig{})
+	be := backend.NewDefaultBackend(fp)
+	s := mvcc.NewStore(zaptest.NewLogger(t), be, nil, mvcc.StoreConfig{})
 	// NOTE: cluster_proxy mode with namespacing won't set 'k', but namespace/'k'.
 	s.Put([]byte("abc"), []byte("def"), 0)
 	s.Put([]byte("xyz"), []byte("123"), 0)
@@ -259,21 +257,19 @@ func TestV3CorruptAlarm(t *testing.T) {
 }
 
 func TestV3CorruptAlarmWithLeaseCorrupted(t *testing.T) {
-	integration.BeforeTest(t)
-	lg := zaptest.NewLogger(t)
-	clus := integration.NewCluster(t, &integration.ClusterConfig{
-		CorruptCheckTime:           time.Second,
-		Size:                       3,
-		SnapshotCount:              10,
-		SnapshotCatchUpEntries:     5,
-		DisableStrictReconfigCheck: true,
+	BeforeTest(t)
+	clus := NewClusterV3(t, &ClusterConfig{
+		CorruptCheckTime:       time.Second,
+		Size:                   3,
+		SnapshotCount:          10,
+		SnapshotCatchUpEntries: 5,
 	})
 	defer clus.Terminate(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	lresp, err := integration.ToGRPC(clus.RandClient()).Lease.LeaseGrant(ctx, &pb.LeaseGrantRequest{ID: 1, TTL: 60})
+	lresp, err := toGRPC(clus.RandClient()).Lease.LeaseGrant(ctx, &pb.LeaseGrantRequest{ID: 1, TTL: 60})
 	if err != nil {
 		t.Errorf("could not create lease 1 (%v)", err)
 	}
@@ -284,41 +280,46 @@ func TestV3CorruptAlarmWithLeaseCorrupted(t *testing.T) {
 	putr := &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar"), Lease: lresp.ID}
 	// Trigger snapshot from the leader to new member
 	for i := 0; i < 15; i++ {
-		_, err = integration.ToGRPC(clus.RandClient()).KV.Put(ctx, putr)
+		_, err := toGRPC(clus.RandClient()).KV.Put(ctx, putr)
 		if err != nil {
 			t.Errorf("#%d: couldn't put key (%v)", i, err)
 		}
 	}
 
-	if err = clus.RemoveMember(t, clus.Client(1), uint64(clus.Members[2].ID())); err != nil {
+	clus.RemoveMember(t, uint64(clus.Members[2].ID()))
+	oldMemberClient := clus.Client(2)
+	if err := oldMemberClient.Close(); err != nil {
 		t.Fatal(err)
 	}
-	clus.WaitMembersForLeader(t, clus.Members)
 
 	clus.AddMember(t)
-	clus.WaitMembersForLeader(t, clus.Members)
 	// Wait for new member to catch up
-	integration.WaitClientV3(t, clus.Members[2].Client)
+	newMemberClient, err := clus.NewClientV3(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	WaitClientV3(t, newMemberClient)
+	clus.clients[2] = newMemberClient
 
 	// Corrupt member 2 by modifying backend lease bucket offline.
 	clus.Members[2].Stop(t)
 	fp := filepath.Join(clus.Members[2].DataDir, "member", "snap", "db")
-	bcfg := backend.DefaultBackendConfig(lg)
+	bcfg := backend.DefaultBackendConfig()
 	bcfg.Path = fp
+	bcfg.Logger = zaptest.NewLogger(t)
 	be := backend.New(bcfg)
 
-	olpb := leasepb.Lease{ID: int64(1), TTL: 60}
 	tx := be.BatchTx()
-	schema.UnsafeDeleteLease(tx, &olpb)
+	tx.UnsafeDelete(buckets.Lease, leaseIdToBytes(1))
 	lpb := leasepb.Lease{ID: int64(2), TTL: 60}
-	schema.MustUnsafePutLease(tx, &lpb)
+	mustUnsafePutLease(tx, &lpb)
 	tx.Commit()
 
-	if err = be.Close(); err != nil {
+	if err := be.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err = clus.Members[2].Restart(t); err != nil {
+	if err := clus.Members[2].Restart(t); err != nil {
 		t.Fatal(err)
 	}
 
@@ -326,15 +327,15 @@ func TestV3CorruptAlarmWithLeaseCorrupted(t *testing.T) {
 	clus.Members[2].WaitOK(t)
 
 	// Revoke lease should remove key except the member with corruption
-	_, err = integration.ToGRPC(clus.Members[0].Client).Lease.LeaseRevoke(ctx, &pb.LeaseRevokeRequest{ID: lresp.ID})
+	_, err = toGRPC(clus.Client(0)).Lease.LeaseRevoke(ctx, &pb.LeaseRevokeRequest{ID: lresp.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp0, err0 := clus.Members[1].Client.KV.Get(context.TODO(), "foo")
+	resp0, err0 := clus.Client(1).KV.Get(context.TODO(), "foo")
 	if err0 != nil {
 		t.Fatal(err0)
 	}
-	resp1, err1 := clus.Members[2].Client.KV.Get(context.TODO(), "foo")
+	resp1, err1 := clus.Client(2).KV.Get(context.TODO(), "foo")
 	if err1 != nil {
 		t.Fatal(err1)
 	}
@@ -353,4 +354,46 @@ func TestV3CorruptAlarmWithLeaseCorrupted(t *testing.T) {
 			return
 		}
 	}
+}
+
+// TestAlarmlistOnMemberRestart refer to https://github.com/etcd-io/etcd/issues/14382
+func TestAlarmlistOnMemberRestart(t *testing.T) {
+	BeforeTest(t)
+	clus := NewClusterV3(t, &ClusterConfig{
+		CorruptCheckTime: time.Second,
+		Size:             1,
+		SnapshotCount:    5,
+	})
+	defer clus.Terminate(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	for i := 0; i < 6; i++ {
+		req := &pb.AlarmRequest{Action: pb.AlarmRequest_GET}
+		if _, err := clus.Members[0].s.Alarm(ctx, req); err != nil {
+			t.Fatalf("unexpected error, %v", err)
+		}
+	}
+
+	clus.Members[0].Stop(t)
+	if err := clus.Members[0].Restart(t); err != nil {
+		t.Fatalf("failed to start member, %v", err)
+	}
+}
+
+func leaseIdToBytes(n int64) []byte {
+	bytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(bytes, uint64(n))
+	return bytes
+}
+
+func mustUnsafePutLease(tx backend.BatchTx, lpb *leasepb.Lease) {
+	key := leaseIdToBytes(lpb.ID)
+
+	val, err := lpb.Marshal()
+	if err != nil {
+		panic("failed to marshal lease proto item")
+	}
+	tx.UnsafePut(buckets.Lease, key, val)
 }

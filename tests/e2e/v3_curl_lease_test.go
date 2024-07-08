@@ -22,17 +22,25 @@ import (
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 )
 
-func TestCurlV3LeaseGrantNoTLS(t *testing.T) {
-	testCtl(t, testCurlV3LeaseGrant, withCfg(*e2e.NewConfigNoTLS()))
+func TestV3CurlLeaseGrantNoTLS(t *testing.T) {
+	for _, p := range apiPrefix {
+		testCtl(t, testV3CurlLeaseGrant, withApiPrefix(p), withCfg(*e2e.NewConfigNoTLS()))
+	}
 }
-func TestCurlV3LeaseRevokeNoTLS(t *testing.T) {
-	testCtl(t, testCurlV3LeaseRevoke, withCfg(*e2e.NewConfigNoTLS()))
+func TestV3CurlLeaseRevokeNoTLS(t *testing.T) {
+	for _, p := range apiPrefix {
+		testCtl(t, testV3CurlLeaseRevoke, withApiPrefix(p), withCfg(*e2e.NewConfigNoTLS()))
+	}
 }
-func TestCurlV3LeaseLeasesNoTLS(t *testing.T) {
-	testCtl(t, testCurlV3LeaseLeases, withCfg(*e2e.NewConfigNoTLS()))
+func TestV3CurlLeaseLeasesNoTLS(t *testing.T) {
+	for _, p := range apiPrefix {
+		testCtl(t, testV3CurlLeaseLeases, withApiPrefix(p), withCfg(*e2e.NewConfigNoTLS()))
+	}
 }
-func TestCurlV3LeaseKeepAliveNoTLS(t *testing.T) {
-	testCtl(t, testCurlV3LeaseKeepAlive, withCfg(*e2e.NewConfigNoTLS()))
+func TestV3CurlLeaseKeepAliveNoTLS(t *testing.T) {
+	for _, p := range apiPrefix {
+		testCtl(t, testV3CurlLeaseKeepAlive, withApiPrefix(p), withCfg(*e2e.NewConfigNoTLS()))
+	}
 }
 
 type v3cURLTest struct {
@@ -41,93 +49,110 @@ type v3cURLTest struct {
 	expected string
 }
 
-func testCurlV3LeaseGrant(cx ctlCtx) {
+// TODO remove /kv/lease/timetolive, /kv/lease/revoke, /kv/lease/leases tests in 3.5 release
+
+func testV3CurlLeaseGrant(cx ctlCtx) {
 	leaseID := e2e.RandomLeaseID()
 
 	tests := []v3cURLTest{
 		{
-			endpoint: "/v3/lease/grant",
+			endpoint: "/lease/grant",
 			value:    gwLeaseGrant(cx, leaseID, 0),
 			expected: gwLeaseIDExpected(leaseID),
 		},
 		{
-			endpoint: "/v3/lease/grant",
+			endpoint: "/lease/grant",
 			value:    gwLeaseGrant(cx, 0, 20),
 			expected: `"TTL":"20"`,
 		},
 		{
-			endpoint: "/v3/kv/put",
+			endpoint: "/kv/put",
 			value:    gwKVPutLease(cx, "foo", "bar", leaseID),
 			expected: `"revision":"`,
 		},
 		{
-			endpoint: "/v3/lease/timetolive",
+			endpoint: "/lease/timetolive",
+			value:    gwLeaseTTLWithKeys(cx, leaseID),
+			expected: `"grantedTTL"`,
+		},
+		{
+			endpoint: "/kv/lease/timetolive",
 			value:    gwLeaseTTLWithKeys(cx, leaseID),
 			expected: `"grantedTTL"`,
 		},
 	}
 	if err := CURLWithExpected(cx, tests); err != nil {
-		cx.t.Fatalf("testCurlV3LeaseGrant: %v", err)
+		cx.t.Fatalf("testV3CurlLeaseGrant: %v", err)
 	}
 }
 
-func testCurlV3LeaseRevoke(cx ctlCtx) {
+func testV3CurlLeaseRevoke(cx ctlCtx) {
 	leaseID := e2e.RandomLeaseID()
 
 	tests := []v3cURLTest{
 		{
-			endpoint: "/v3/lease/grant",
+			endpoint: "/lease/grant",
 			value:    gwLeaseGrant(cx, leaseID, 0),
 			expected: gwLeaseIDExpected(leaseID),
 		},
 		{
-			endpoint: "/v3/lease/revoke",
+			endpoint: "/lease/revoke",
 			value:    gwLeaseRevoke(cx, leaseID),
 			expected: `"revision":"`,
 		},
+		{
+			endpoint: "/kv/lease/revoke",
+			value:    gwLeaseRevoke(cx, leaseID),
+			expected: `etcdserver: requested lease not found`,
+		},
 	}
 	if err := CURLWithExpected(cx, tests); err != nil {
-		cx.t.Fatalf("testCurlV3LeaseRevoke: %v", err)
+		cx.t.Fatalf("testV3CurlLeaseRevoke: %v", err)
 	}
 }
 
-func testCurlV3LeaseLeases(cx ctlCtx) {
+func testV3CurlLeaseLeases(cx ctlCtx) {
 	leaseID := e2e.RandomLeaseID()
 
 	tests := []v3cURLTest{
 		{
-			endpoint: "/v3/lease/grant",
+			endpoint: "/lease/grant",
 			value:    gwLeaseGrant(cx, leaseID, 0),
 			expected: gwLeaseIDExpected(leaseID),
 		},
 		{
-			endpoint: "/v3/lease/leases",
+			endpoint: "/lease/leases",
+			value:    "{}",
+			expected: gwLeaseIDExpected(leaseID),
+		},
+		{
+			endpoint: "/kv/lease/leases",
 			value:    "{}",
 			expected: gwLeaseIDExpected(leaseID),
 		},
 	}
 	if err := CURLWithExpected(cx, tests); err != nil {
-		cx.t.Fatalf("testCurlV3LeaseGrant: %v", err)
+		cx.t.Fatalf("testV3CurlLeaseGrant: %v", err)
 	}
 }
 
-func testCurlV3LeaseKeepAlive(cx ctlCtx) {
+func testV3CurlLeaseKeepAlive(cx ctlCtx) {
 	leaseID := e2e.RandomLeaseID()
 
 	tests := []v3cURLTest{
 		{
-			endpoint: "/v3/lease/grant",
+			endpoint: "/lease/grant",
 			value:    gwLeaseGrant(cx, leaseID, 0),
 			expected: gwLeaseIDExpected(leaseID),
 		},
 		{
-			endpoint: "/v3/lease/keepalive",
+			endpoint: "/lease/keepalive",
 			value:    gwLeaseKeepAlive(cx, leaseID),
 			expected: gwLeaseIDExpected(leaseID),
 		},
 	}
 	if err := CURLWithExpected(cx, tests); err != nil {
-		cx.t.Fatalf("testCurlV3LeaseGrant: %v", err)
+		cx.t.Fatalf("testV3CurlLeaseGrant: %v", err)
 	}
 }
 

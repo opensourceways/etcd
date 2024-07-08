@@ -13,38 +13,35 @@
 // limitations under the License.
 
 //go:build cluster_proxy
+// +build cluster_proxy
 
 package e2e
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"path"
 	"strconv"
 	"strings"
-	"testing"
-
-	"go.uber.org/zap"
 
 	"go.etcd.io/etcd/pkg/v3/expect"
-	"go.etcd.io/etcd/tests/v3/framework/config"
+	"go.uber.org/zap"
 )
 
 type proxyEtcdProcess struct {
 	*EtcdServerProcess
-	// TODO(ahrtr): We need to remove `proxyV2` and v2discovery when the v2client is removed.
 	proxyV2 *proxyV2Proc
 	proxyV3 *proxyV3Proc
 }
 
-func NewEtcdProcess(t testing.TB, cfg *EtcdServerProcessConfig) (EtcdProcess, error) {
-	return NewProxyEtcdProcess(t, cfg)
+func NewEtcdProcess(cfg *EtcdServerProcessConfig) (EtcdProcess, error) {
+	return NewProxyEtcdProcess(cfg)
 }
 
-func NewProxyEtcdProcess(t testing.TB, cfg *EtcdServerProcessConfig) (*proxyEtcdProcess, error) {
-	ep, err := NewEtcdServerProcess(t, cfg)
+func NewProxyEtcdProcess(cfg *EtcdServerProcessConfig) (*proxyEtcdProcess, error) {
+	ep, err := NewEtcdServerProcess(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -56,28 +53,41 @@ func NewProxyEtcdProcess(t testing.TB, cfg *EtcdServerProcessConfig) (*proxyEtcd
 	return pep, nil
 }
 
+func (p *proxyEtcdProcess) Config() *EtcdServerProcessConfig { return p.EtcdServerProcess.Config() }
+
+func (p *proxyEtcdProcess) EndpointsV2() []string   { return p.EndpointsHTTP() }
+func (p *proxyEtcdProcess) EndpointsV3() []string   { return p.EndpointsGRPC() }
 func (p *proxyEtcdProcess) EndpointsHTTP() []string { return p.proxyV2.endpoints() }
 func (p *proxyEtcdProcess) EndpointsGRPC() []string { return p.proxyV3.endpoints() }
 func (p *proxyEtcdProcess) EndpointsMetrics() []string {
 	panic("not implemented; proxy doesn't provide health information")
 }
 
-func (p *proxyEtcdProcess) Start(ctx context.Context) error {
-	if err := p.EtcdServerProcess.Start(ctx); err != nil {
+func (p *proxyEtcdProcess) Start() error {
+	if err := p.EtcdServerProcess.Start(); err != nil {
 		return err
 	}
-	return p.proxyV3.Start(ctx)
+	if err := p.proxyV2.Start(); err != nil {
+		return err
+	}
+	return p.proxyV3.Start()
 }
 
-func (p *proxyEtcdProcess) Restart(ctx context.Context) error {
-	if err := p.EtcdServerProcess.Restart(ctx); err != nil {
+func (p *proxyEtcdProcess) Restart() error {
+	if err := p.EtcdServerProcess.Restart(); err != nil {
 		return err
 	}
-	return p.proxyV3.Restart(ctx)
+	if err := p.proxyV2.Restart(); err != nil {
+		return err
+	}
+	return p.proxyV3.Restart()
 }
 
 func (p *proxyEtcdProcess) Stop() error {
-	err := p.proxyV3.Stop()
+	err := p.proxyV2.Stop()
+	if v3err := p.proxyV3.Stop(); err == nil {
+		err = v3err
+	}
 	if eerr := p.EtcdServerProcess.Stop(); eerr != nil && err == nil {
 		// fails on go-grpc issue #1384
 		if !strings.Contains(eerr.Error(), "exit status 2") {
@@ -88,7 +98,10 @@ func (p *proxyEtcdProcess) Stop() error {
 }
 
 func (p *proxyEtcdProcess) Close() error {
-	err := p.proxyV3.Close()
+	err := p.proxyV2.Close()
+	if v3err := p.proxyV3.Close(); err == nil {
+		err = v3err
+	}
 	if eerr := p.EtcdServerProcess.Close(); eerr != nil && err == nil {
 		// fails on go-grpc issue #1384
 		if !strings.Contains(eerr.Error(), "exit status 2") {
@@ -98,17 +111,18 @@ func (p *proxyEtcdProcess) Close() error {
 	return err
 }
 
-func (p *proxyEtcdProcess) Etcdctl(opts ...config.ClientOption) *EtcdctlV3 {
-	etcdctl, err := NewEtcdctl(p.EtcdServerProcess.Config().Client, p.EtcdServerProcess.EndpointsGRPC(), opts...)
-	if err != nil {
-		panic(err)
-	}
-	return etcdctl
+func (p *proxyEtcdProcess) WithStopSignal(sig os.Signal) os.Signal {
+	p.proxyV3.WithStopSignal(sig)
+	p.proxyV3.WithStopSignal(sig)
+	return p.EtcdServerProcess.WithStopSignal(sig)
+}
+
+func (p *proxyEtcdProcess) Logs() LogsExpect {
+	return p.EtcdServerProcess.Logs()
 }
 
 type proxyProc struct {
 	lg       *zap.Logger
-	name     string
 	execPath string
 	args     []string
 	ep       string
@@ -124,7 +138,7 @@ func (pp *proxyProc) start() error {
 	if pp.proc != nil {
 		panic("already started")
 	}
-	proc, err := SpawnCmdWithLogger(pp.lg, append([]string{pp.execPath}, pp.args...), nil, pp.name)
+	proc, err := SpawnCmdWithLogger(pp.lg, append([]string{pp.execPath}, pp.args...), nil)
 	if err != nil {
 		return err
 	}
@@ -132,34 +146,29 @@ func (pp *proxyProc) start() error {
 	return nil
 }
 
-func (pp *proxyProc) waitReady(ctx context.Context, readyStr string) error {
+func (pp *proxyProc) waitReady(readyStr string) error {
 	defer close(pp.donec)
-	return WaitReadyExpectProc(ctx, pp.proc, []string{readyStr})
+	return WaitReadyExpectProc(pp.proc, []string{readyStr})
 }
 
 func (pp *proxyProc) Stop() error {
 	if pp.proc == nil {
 		return nil
 	}
-	err := pp.proc.Stop()
-	if err != nil {
+	if err := pp.proc.Stop(); err != nil && !strings.Contains(err.Error(), "exit status 1") {
+		// v2proxy exits with status 1 on auto tls; not sure why
 		return err
-	}
-
-	err = pp.proc.Close()
-	if err != nil {
-		// proxy received SIGTERM signal
-		if !(strings.Contains(err.Error(), "unexpected exit code") ||
-			// v2proxy exits with status 1 on auto tls; not sure why
-			strings.Contains(err.Error(), "exit status 1")) {
-
-			return err
-		}
 	}
 	pp.proc = nil
 	<-pp.donec
 	pp.donec = make(chan struct{})
 	return nil
+}
+
+func (pp *proxyProc) WithStopSignal(sig os.Signal) os.Signal {
+	ret := pp.proc.StopSignal
+	pp.proc.StopSignal = sig
+	return ret
 }
 
 func (pp *proxyProc) Close() error { return pp.Stop() }
@@ -170,7 +179,7 @@ type proxyV2Proc struct {
 }
 
 func proxyListenURL(cfg *EtcdServerProcessConfig, portOffset int) string {
-	u, err := url.Parse(cfg.ClientURL)
+	u, err := url.Parse(cfg.Acurl)
 	if err != nil {
 		panic(err)
 	}
@@ -188,20 +197,44 @@ func newProxyV2Proc(cfg *EtcdServerProcessConfig) *proxyV2Proc {
 		"--name", name,
 		"--proxy", "on",
 		"--listen-client-urls", listenAddr,
-		"--initial-cluster", cfg.Name + "=" + cfg.PeerURL.String(),
+		"--initial-cluster", cfg.Name + "=" + cfg.Purl.String(),
 		"--data-dir", dataDir,
 	}
 	return &proxyV2Proc{
 		proxyProc: proxyProc{
-			name:     cfg.Name,
 			lg:       cfg.lg,
 			execPath: cfg.ExecPath,
-			args:     append(args, cfg.TLSArgs...),
+			args:     append(args, cfg.TlsArgs...),
 			ep:       listenAddr,
 			donec:    make(chan struct{}),
 		},
 		dataDir: dataDir,
 	}
+}
+
+func (v2p *proxyV2Proc) Start() error {
+	os.RemoveAll(v2p.dataDir)
+	if err := v2p.start(); err != nil {
+		return err
+	}
+	// The full line we are expecting in the logs:
+	// "caller":"httpproxy/director.go:65","msg":"endpoints found","endpoints":["http://localhost:20000"]}
+	return v2p.waitReady("endpoints found")
+}
+
+func (v2p *proxyV2Proc) Restart() error {
+	if err := v2p.Stop(); err != nil {
+		return err
+	}
+	return v2p.Start()
+}
+
+func (v2p *proxyV2Proc) Stop() error {
+	if err := v2p.proxyProc.Stop(); err != nil {
+		return err
+	}
+	// v2 proxy caches members; avoid reuse of directory
+	return os.RemoveAll(v2p.dataDir)
 }
 
 type proxyV3Proc struct {
@@ -214,27 +247,27 @@ func newProxyV3Proc(cfg *EtcdServerProcessConfig) *proxyV3Proc {
 		"grpc-proxy",
 		"start",
 		"--listen-addr", strings.Split(listenAddr, "/")[2],
-		"--endpoints", cfg.ClientURL,
+		"--endpoints", cfg.Acurl,
 		// pass-through member RPCs
 		"--advertise-client-url", "",
 		"--data-dir", cfg.DataDirPath,
 	}
 	murl := ""
-	if cfg.MetricsURL != "" {
+	if cfg.Murl != "" {
 		murl = proxyListenURL(cfg, 4)
 		args = append(args, "--metrics-addr", murl)
 	}
 	tlsArgs := []string{}
-	for i := 0; i < len(cfg.TLSArgs); i++ {
-		switch cfg.TLSArgs[i] {
+	for i := 0; i < len(cfg.TlsArgs); i++ {
+		switch cfg.TlsArgs[i] {
 		case "--cert-file":
-			tlsArgs = append(tlsArgs, "--cert-file", cfg.TLSArgs[i+1])
+			tlsArgs = append(tlsArgs, "--cert-file", cfg.TlsArgs[i+1])
 			i++
 		case "--key-file":
-			tlsArgs = append(tlsArgs, "--key-file", cfg.TLSArgs[i+1])
+			tlsArgs = append(tlsArgs, "--key-file", cfg.TlsArgs[i+1])
 			i++
 		case "--trusted-ca-file":
-			tlsArgs = append(tlsArgs, "--trusted-ca-file", cfg.TLSArgs[i+1])
+			tlsArgs = append(tlsArgs, "--trusted-ca-file", cfg.TlsArgs[i+1])
 			i++
 		case "--auto-tls":
 			tlsArgs = append(tlsArgs, "--auto-tls", "--insecure-skip-tls-verify")
@@ -242,10 +275,9 @@ func newProxyV3Proc(cfg *EtcdServerProcessConfig) *proxyV3Proc {
 			i++ // skip arg
 		case "--client-cert-auth", "--peer-auto-tls":
 		default:
-			tlsArgs = append(tlsArgs, cfg.TLSArgs[i])
+			tlsArgs = append(tlsArgs, cfg.TlsArgs[i])
 		}
-	}
-	if len(cfg.TLSArgs) > 0 {
+
 		// Configure certificates for connection proxy ---> server.
 		// This certificate must NOT have CN set.
 		tlsArgs = append(tlsArgs,
@@ -254,10 +286,8 @@ func newProxyV3Proc(cfg *EtcdServerProcessConfig) *proxyV3Proc {
 			"--cacert", path.Join(FixturesDir, "ca.crt"),
 			"--client-crl-file", path.Join(FixturesDir, "revoke.crl"))
 	}
-
 	return &proxyV3Proc{
 		proxyProc{
-			name:     cfg.Name,
 			lg:       cfg.lg,
 			execPath: cfg.ExecPath,
 			args:     append(args, tlsArgs...),
@@ -268,16 +298,16 @@ func newProxyV3Proc(cfg *EtcdServerProcessConfig) *proxyV3Proc {
 	}
 }
 
-func (v3p *proxyV3Proc) Restart(ctx context.Context) error {
+func (v3p *proxyV3Proc) Restart() error {
 	if err := v3p.Stop(); err != nil {
 		return err
 	}
-	return v3p.Start(ctx)
+	return v3p.Start()
 }
 
-func (v3p *proxyV3Proc) Start(ctx context.Context) error {
+func (v3p *proxyV3Proc) Start() error {
 	if err := v3p.start(); err != nil {
 		return err
 	}
-	return v3p.waitReady(ctx, "started gRPC proxy")
+	return v3p.waitReady("started gRPC proxy")
 }

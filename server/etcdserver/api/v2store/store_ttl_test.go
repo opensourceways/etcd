@@ -18,17 +18,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonboulle/clockwork"
-	"github.com/stretchr/testify/assert"
-
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v2error"
+
+	"github.com/jonboulle/clockwork"
 )
 
-// TestMinExpireTime ensures that any TTL <= minExpireTime becomes Permanent
+// TestMinExpireTime to ensure that any TTL <= minExpireTime becomes Permanent
 func TestMinExpireTime(t *testing.T) {
 	s := newStore()
-	fc := clockwork.NewFakeClockAt(time.Date(1984, time.April, 4, 0, 0, 0, 0, time.UTC))
+	fc := clockwork.NewFakeClock()
 	s.clock = fc
 	// FakeClock starts at 0, so minExpireTime should be far in the future.. but just in case
 	testutil.AssertTrue(t, minExpireTime.After(fc.Now()), "minExpireTime should be ahead of FakeClock!")
@@ -39,13 +38,13 @@ func TestMinExpireTime(t *testing.T) {
 	var eidx uint64 = 1
 	e, err := s.Get("/foo", true, false)
 	testutil.AssertNil(t, err)
-	assert.Equal(t, e.EtcdIndex, eidx)
-	assert.Equal(t, e.Action, "get")
-	assert.Equal(t, e.Node.Key, "/foo")
-	assert.Equal(t, e.Node.TTL, int64(0))
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, e.Action, "get")
+	testutil.AssertEqual(t, e.Node.Key, "/foo")
+	testutil.AssertEqual(t, e.Node.TTL, int64(0))
 }
 
-// TestStoreGetDirectory ensures that the store can recursively retrieve a directory listing.
+// TestStoreGetDirectory to ensure that the store can recursively retrieve a directory listing.
 // Note that hidden files should not be returned.
 func TestStoreGetDirectory(t *testing.T) {
 	s := newStore()
@@ -61,19 +60,19 @@ func TestStoreGetDirectory(t *testing.T) {
 	var eidx uint64 = 7
 	e, err := s.Get("/foo", true, false)
 	testutil.AssertNil(t, err)
-	assert.Equal(t, e.EtcdIndex, eidx)
-	assert.Equal(t, e.Action, "get")
-	assert.Equal(t, e.Node.Key, "/foo")
-	assert.Equal(t, len(e.Node.Nodes), 2)
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, e.Action, "get")
+	testutil.AssertEqual(t, e.Node.Key, "/foo")
+	testutil.AssertEqual(t, len(e.Node.Nodes), 2)
 	var bazNodes NodeExterns
 	for _, node := range e.Node.Nodes {
 		switch node.Key {
 		case "/foo/bar":
-			assert.Equal(t, *node.Value, "X")
-			assert.Equal(t, node.Dir, false)
+			testutil.AssertEqual(t, *node.Value, "X")
+			testutil.AssertEqual(t, node.Dir, false)
 		case "/foo/baz":
-			assert.Equal(t, node.Dir, true)
-			assert.Equal(t, len(node.Nodes), 2)
+			testutil.AssertEqual(t, node.Dir, true)
+			testutil.AssertEqual(t, len(node.Nodes), 2)
 			bazNodes = node.Nodes
 		default:
 			t.Errorf("key = %s, not matched", node.Key)
@@ -82,19 +81,19 @@ func TestStoreGetDirectory(t *testing.T) {
 	for _, node := range bazNodes {
 		switch node.Key {
 		case "/foo/baz/bat":
-			assert.Equal(t, *node.Value, "Y")
-			assert.Equal(t, node.Dir, false)
+			testutil.AssertEqual(t, *node.Value, "Y")
+			testutil.AssertEqual(t, node.Dir, false)
 		case "/foo/baz/ttl":
-			assert.Equal(t, *node.Value, "Y")
-			assert.Equal(t, node.Dir, false)
-			assert.Equal(t, node.TTL, int64(3))
+			testutil.AssertEqual(t, *node.Value, "Y")
+			testutil.AssertEqual(t, node.Dir, false)
+			testutil.AssertEqual(t, node.TTL, int64(3))
 		default:
 			t.Errorf("key = %s, not matched", node.Key)
 		}
 	}
 }
 
-// TestStoreUpdateValueTTL ensures that the store can update the TTL on a value.
+// TestStoreUpdateValueTTL to ensure that the store can update the TTL on a value.
 func TestStoreUpdateValueTTL(t *testing.T) {
 	s := newStore()
 	fc := newFakeClock()
@@ -105,16 +104,16 @@ func TestStoreUpdateValueTTL(t *testing.T) {
 	_, err := s.Update("/foo", "baz", TTLOptionSet{ExpireTime: fc.Now().Add(500 * time.Millisecond)})
 	testutil.AssertNil(t, err)
 	e, _ := s.Get("/foo", false, false)
-	assert.Equal(t, *e.Node.Value, "baz")
-	assert.Equal(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, *e.Node.Value, "baz")
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
 	fc.Advance(600 * time.Millisecond)
 	s.DeleteExpiredKeys(fc.Now())
 	e, err = s.Get("/foo", false, false)
 	testutil.AssertNil(t, e)
-	assert.Equal(t, err.(*v2error.Error).ErrorCode, v2error.EcodeKeyNotFound)
+	testutil.AssertEqual(t, err.(*v2error.Error).ErrorCode, v2error.EcodeKeyNotFound)
 }
 
-// TestStoreUpdateDirTTL ensures that the store can update the TTL on a directory.
+// TestStoreUpdateDirTTL to ensure that the store can update the TTL on a directory.
 func TestStoreUpdateDirTTL(t *testing.T) {
 	s := newStore()
 	fc := newFakeClock()
@@ -127,20 +126,20 @@ func TestStoreUpdateDirTTL(t *testing.T) {
 	testutil.AssertNil(t, err)
 	e, err := s.Update("/foo/bar", "", TTLOptionSet{ExpireTime: fc.Now().Add(500 * time.Millisecond)})
 	testutil.AssertNil(t, err)
-	assert.Equal(t, e.Node.Dir, false)
-	assert.Equal(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, e.Node.Dir, false)
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
 	e, _ = s.Get("/foo/bar", false, false)
-	assert.Equal(t, *e.Node.Value, "")
-	assert.Equal(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, *e.Node.Value, "")
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
 
 	fc.Advance(600 * time.Millisecond)
 	s.DeleteExpiredKeys(fc.Now())
 	e, err = s.Get("/foo/bar", false, false)
 	testutil.AssertNil(t, e)
-	assert.Equal(t, err.(*v2error.Error).ErrorCode, v2error.EcodeKeyNotFound)
+	testutil.AssertEqual(t, err.(*v2error.Error).ErrorCode, v2error.EcodeKeyNotFound)
 }
 
-// TestStoreWatchExpire ensures that the store can watch for key expiration.
+// TestStoreWatchExpire to ensure that the store can watch for key expiration.
 func TestStoreWatchExpire(t *testing.T) {
 	s := newStore()
 	fc := newFakeClock()
@@ -152,7 +151,7 @@ func TestStoreWatchExpire(t *testing.T) {
 	s.Create("/foodir", true, "", false, TTLOptionSet{ExpireTime: fc.Now().Add(500 * time.Millisecond)})
 
 	w, _ := s.Watch("/", true, false, 0)
-	assert.Equal(t, w.StartIndex(), eidx)
+	testutil.AssertEqual(t, w.StartIndex(), eidx)
 	c := w.EventChan()
 	e := nbselect(c)
 	testutil.AssertNil(t, e)
@@ -160,25 +159,25 @@ func TestStoreWatchExpire(t *testing.T) {
 	s.DeleteExpiredKeys(fc.Now())
 	eidx = 4
 	e = nbselect(c)
-	assert.Equal(t, e.EtcdIndex, eidx)
-	assert.Equal(t, e.Action, "expire")
-	assert.Equal(t, e.Node.Key, "/foo")
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, e.Action, "expire")
+	testutil.AssertEqual(t, e.Node.Key, "/foo")
 	w, _ = s.Watch("/", true, false, 5)
 	eidx = 6
-	assert.Equal(t, w.StartIndex(), eidx)
+	testutil.AssertEqual(t, w.StartIndex(), eidx)
 	e = nbselect(w.EventChan())
-	assert.Equal(t, e.EtcdIndex, eidx)
-	assert.Equal(t, e.Action, "expire")
-	assert.Equal(t, e.Node.Key, "/foofoo")
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, e.Action, "expire")
+	testutil.AssertEqual(t, e.Node.Key, "/foofoo")
 	w, _ = s.Watch("/", true, false, 6)
 	e = nbselect(w.EventChan())
-	assert.Equal(t, e.EtcdIndex, eidx)
-	assert.Equal(t, e.Action, "expire")
-	assert.Equal(t, e.Node.Key, "/foodir")
-	assert.Equal(t, e.Node.Dir, true)
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, e.Action, "expire")
+	testutil.AssertEqual(t, e.Node.Key, "/foodir")
+	testutil.AssertEqual(t, e.Node.Dir, true)
 }
 
-// TestStoreWatchExpireRefresh ensures that the store can watch for key expiration when refreshing.
+// TestStoreWatchExpireRefresh to ensure that the store can watch for key expiration when refreshing.
 func TestStoreWatchExpireRefresh(t *testing.T) {
 	s := newStore()
 	fc := newFakeClock()
@@ -190,7 +189,7 @@ func TestStoreWatchExpireRefresh(t *testing.T) {
 
 	// Make sure we set watch updates when Refresh is true for newly created keys
 	w, _ := s.Watch("/", true, false, 0)
-	assert.Equal(t, w.StartIndex(), eidx)
+	testutil.AssertEqual(t, w.StartIndex(), eidx)
 	c := w.EventChan()
 	e := nbselect(c)
 	testutil.AssertNil(t, e)
@@ -198,23 +197,23 @@ func TestStoreWatchExpireRefresh(t *testing.T) {
 	s.DeleteExpiredKeys(fc.Now())
 	eidx = 3
 	e = nbselect(c)
-	assert.Equal(t, e.EtcdIndex, eidx)
-	assert.Equal(t, e.Action, "expire")
-	assert.Equal(t, e.Node.Key, "/foo")
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, e.Action, "expire")
+	testutil.AssertEqual(t, e.Node.Key, "/foo")
 
 	s.Update("/foofoo", "", TTLOptionSet{ExpireTime: fc.Now().Add(500 * time.Millisecond), Refresh: true})
 	w, _ = s.Watch("/", true, false, 4)
 	fc.Advance(700 * time.Millisecond)
 	s.DeleteExpiredKeys(fc.Now())
 	eidx = 5 // We should skip 4 because a TTL update should occur with no watch notification if set `TTLOptionSet.Refresh` to true
-	assert.Equal(t, w.StartIndex(), eidx-1)
+	testutil.AssertEqual(t, w.StartIndex(), eidx-1)
 	e = nbselect(w.EventChan())
-	assert.Equal(t, e.EtcdIndex, eidx)
-	assert.Equal(t, e.Action, "expire")
-	assert.Equal(t, e.Node.Key, "/foofoo")
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, e.Action, "expire")
+	testutil.AssertEqual(t, e.Node.Key, "/foofoo")
 }
 
-// TestStoreWatchExpireEmptyRefresh ensures that the store can watch for key expiration when refreshing with an empty value.
+// TestStoreWatchExpireEmptyRefresh to ensure that the store can watch for key expiration when refreshing with an empty value.
 func TestStoreWatchExpireEmptyRefresh(t *testing.T) {
 	s := newStore()
 	fc := newFakeClock()
@@ -231,15 +230,15 @@ func TestStoreWatchExpireEmptyRefresh(t *testing.T) {
 	fc.Advance(700 * time.Millisecond)
 	s.DeleteExpiredKeys(fc.Now())
 	eidx = 3 // We should skip 2 because a TTL update should occur with no watch notification if set `TTLOptionSet.Refresh` to true
-	assert.Equal(t, w.StartIndex(), eidx-1)
+	testutil.AssertEqual(t, w.StartIndex(), eidx-1)
 	e := nbselect(w.EventChan())
-	assert.Equal(t, e.EtcdIndex, eidx)
-	assert.Equal(t, e.Action, "expire")
-	assert.Equal(t, e.Node.Key, "/foo")
-	assert.Equal(t, *e.PrevNode.Value, "bar")
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, e.Action, "expire")
+	testutil.AssertEqual(t, e.Node.Key, "/foo")
+	testutil.AssertEqual(t, *e.PrevNode.Value, "bar")
 }
 
-// TestStoreWatchNoRefresh updates TTL of a key (set TTLOptionSet.Refresh to false) and send notification
+// TestStoreWatchNoRefresh to update TTL of a key (set TTLOptionSet.Refresh to false) and send notification
 func TestStoreWatchNoRefresh(t *testing.T) {
 	s := newStore()
 	fc := newFakeClock()
@@ -257,15 +256,15 @@ func TestStoreWatchNoRefresh(t *testing.T) {
 	fc.Advance(700 * time.Millisecond)
 	s.DeleteExpiredKeys(fc.Now())
 	eidx = 2
-	assert.Equal(t, w.StartIndex(), eidx)
+	testutil.AssertEqual(t, w.StartIndex(), eidx)
 	e := nbselect(w.EventChan())
-	assert.Equal(t, e.EtcdIndex, eidx)
-	assert.Equal(t, e.Action, "update")
-	assert.Equal(t, e.Node.Key, "/foo")
-	assert.Equal(t, *e.PrevNode.Value, "bar")
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, e.Action, "update")
+	testutil.AssertEqual(t, e.Node.Key, "/foo")
+	testutil.AssertEqual(t, *e.PrevNode.Value, "bar")
 }
 
-// TestStoreRefresh ensures that the store can update the TTL on a value with refresh.
+// TestStoreRefresh to ensure that the store can update the TTL on a value with refresh.
 func TestStoreRefresh(t *testing.T) {
 	s := newStore()
 	fc := newFakeClock()
@@ -287,7 +286,7 @@ func TestStoreRefresh(t *testing.T) {
 	testutil.AssertNil(t, err)
 }
 
-// TestStoreRecoverWithExpiration ensures that the store can recover from a previously saved state that includes an expiring key.
+// TestStoreRecoverWithExpiration to ensure that the store can recover from a previously saved state that includes an expiring key.
 func TestStoreRecoverWithExpiration(t *testing.T) {
 	s := newStore()
 	s.clock = newFakeClock()
@@ -313,22 +312,22 @@ func TestStoreRecoverWithExpiration(t *testing.T) {
 
 	e, err := s.Get("/foo/x", false, false)
 	testutil.AssertNil(t, err)
-	assert.Equal(t, e.EtcdIndex, eidx)
-	assert.Equal(t, *e.Node.Value, "bar")
+	testutil.AssertEqual(t, e.EtcdIndex, eidx)
+	testutil.AssertEqual(t, *e.Node.Value, "bar")
 
 	e, err = s.Get("/foo/y", false, false)
 	testutil.AssertNotNil(t, err)
 	testutil.AssertNil(t, e)
 }
 
-// TestStoreWatchExpireWithHiddenKey ensures that the store doesn't see expirations of hidden keys.
+// TestStoreWatchExpireWithHiddenKey to ensure that the store doesn't see expirations of hidden keys.
 func TestStoreWatchExpireWithHiddenKey(t *testing.T) {
 	s := newStore()
 	fc := newFakeClock()
 	s.clock = fc
 
 	s.Create("/_foo", false, "bar", false, TTLOptionSet{ExpireTime: fc.Now().Add(500 * time.Millisecond)})
-	s.Create("/foofoo", false, "barbarbar", false, TTLOptionSet{ExpireTime: fc.Now().Add(time.Second)})
+	s.Create("/foofoo", false, "barbarbar", false, TTLOptionSet{ExpireTime: fc.Now().Add(1000 * time.Millisecond)})
 
 	w, _ := s.Watch("/", true, false, 0)
 	c := w.EventChan()
@@ -341,8 +340,8 @@ func TestStoreWatchExpireWithHiddenKey(t *testing.T) {
 	fc.Advance(600 * time.Millisecond)
 	s.DeleteExpiredKeys(fc.Now())
 	e = nbselect(c)
-	assert.Equal(t, e.Action, "expire")
-	assert.Equal(t, e.Node.Key, "/foofoo")
+	testutil.AssertEqual(t, e.Action, "expire")
+	testutil.AssertEqual(t, e.Node.Key, "/foofoo")
 }
 
 // newFakeClock creates a new FakeClock that has been advanced to at least minExpireTime

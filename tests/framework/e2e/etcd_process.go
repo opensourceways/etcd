@@ -24,46 +24,49 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/coreos/go-semver/semver"
-	"go.uber.org/zap"
-
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/pkg/v3/expect"
 	"go.etcd.io/etcd/pkg/v3/proxy"
-	"go.etcd.io/etcd/tests/v3/framework/config"
+	"go.uber.org/zap"
 )
 
 var (
 	EtcdServerReadyLines = []string{"ready to serve client requests"}
+	BinPath              string
+	BinPathLastRelease   string
+	CtlBinPath           string
+	UtlBinPath           string
 )
 
 // EtcdProcess is a process that serves etcd requests.
 type EtcdProcess interface {
+	EndpointsV2() []string
+	EndpointsV3() []string
 	EndpointsGRPC() []string
 	EndpointsHTTP() []string
 	EndpointsMetrics() []string
-	Etcdctl(opts ...config.ClientOption) *EtcdctlV3
 
-	IsRunning() bool
-	Wait(ctx context.Context) error
-	Start(ctx context.Context) error
-	Restart(ctx context.Context) error
+	Start() error
+	Restart() error
 	Stop() error
 	Close() error
+	WithStopSignal(sig os.Signal) os.Signal
 	Config() *EtcdServerProcessConfig
+	Logs() LogsExpect
+
 	PeerProxy() proxy.Server
 	Failpoints() *BinaryFailpoints
-	LazyFS() *LazyFS
-	Logs() LogsExpect
-	Kill() error
+	IsRunning() bool
+
+	Etcdctl(connType ClientConnType, isAutoTLS bool, v2 bool) *Etcdctl
 }
 
 type LogsExpect interface {
-	ExpectWithContext(context.Context, expect.ExpectedResponse) (string, error)
+	Expect(string) (string, error)
 	Lines() []string
 	LineCount() int
 }
@@ -72,7 +75,6 @@ type EtcdServerProcess struct {
 	cfg        *EtcdServerProcessConfig
 	proc       *expect.ExpectProcess
 	proxy      proxy.Server
-	lazyfs     *LazyFS
 	failpoints *BinaryFailpoints
 	donec      chan struct{} // closed when Interact() terminates
 }
@@ -81,38 +83,33 @@ type EtcdServerProcessConfig struct {
 	lg       *zap.Logger
 	ExecPath string
 	Args     []string
-	TLSArgs  []string
+	TlsArgs  []string
 	EnvVars  map[string]string
 
-	Client      ClientConfig
 	DataDirPath string
 	KeepDataDir bool
 
 	Name string
 
-	PeerURL       url.URL
-	ClientURL     string
-	ClientHTTPURL string
-	MetricsURL    string
+	Purl url.URL
+
+	Acurl         string
+	Murl          string
+	ClientHttpUrl string
 
 	InitialToken        string
 	InitialCluster      string
 	GoFailPort          int
 	GoFailClientTimeout time.Duration
-
-	LazyFSEnabled bool
-	Proxy         *proxy.ServerConfig
+	Proxy               *proxy.ServerConfig
 }
 
-func NewEtcdServerProcess(t testing.TB, cfg *EtcdServerProcessConfig) (*EtcdServerProcess, error) {
+func NewEtcdServerProcess(cfg *EtcdServerProcessConfig) (*EtcdServerProcess, error) {
 	if !fileutil.Exist(cfg.ExecPath) {
 		return nil, fmt.Errorf("could not find etcd binary: %s", cfg.ExecPath)
 	}
 	if !cfg.KeepDataDir {
 		if err := os.RemoveAll(cfg.DataDirPath); err != nil {
-			return nil, err
-		}
-		if err := os.Mkdir(cfg.DataDirPath, 0700); err != nil {
 			return nil, err
 		}
 	}
@@ -123,31 +120,21 @@ func NewEtcdServerProcess(t testing.TB, cfg *EtcdServerProcessConfig) (*EtcdServ
 			clientTimeout: cfg.GoFailClientTimeout,
 		}
 	}
-	if cfg.LazyFSEnabled {
-		ep.lazyfs = newLazyFS(cfg.lg, cfg.DataDirPath, t)
-	}
 	return ep, nil
 }
 
-func (ep *EtcdServerProcess) EndpointsGRPC() []string { return []string{ep.cfg.ClientURL} }
+func (ep *EtcdServerProcess) EndpointsV2() []string   { return ep.EndpointsHTTP() }
+func (ep *EtcdServerProcess) EndpointsV3() []string   { return ep.EndpointsGRPC() }
+func (ep *EtcdServerProcess) EndpointsGRPC() []string { return []string{ep.cfg.Acurl} }
 func (ep *EtcdServerProcess) EndpointsHTTP() []string {
-	if ep.cfg.ClientHTTPURL == "" {
-		return []string{ep.cfg.ClientURL}
+	if ep.cfg.ClientHttpUrl == "" {
+		return []string{ep.cfg.Acurl}
 	}
-	return []string{ep.cfg.ClientHTTPURL}
+	return []string{ep.cfg.ClientHttpUrl}
 }
-func (ep *EtcdServerProcess) EndpointsMetrics() []string { return []string{ep.cfg.MetricsURL} }
+func (ep *EtcdServerProcess) EndpointsMetrics() []string { return []string{ep.cfg.Murl} }
 
-func (ep *EtcdServerProcess) Etcdctl(opts ...config.ClientOption) *EtcdctlV3 {
-	etcdctl, err := NewEtcdctl(ep.Config().Client, ep.EndpointsGRPC(), opts...)
-	if err != nil {
-		panic(err)
-	}
-	return etcdctl
-}
-
-func (ep *EtcdServerProcess) Start(ctx context.Context) error {
-	ep.donec = make(chan struct{})
+func (ep *EtcdServerProcess) Start() error {
 	if ep.proc != nil {
 		panic("already started")
 	}
@@ -160,62 +147,46 @@ func (ep *EtcdServerProcess) Start(ctx context.Context) error {
 			return err
 		}
 	}
-	if ep.lazyfs != nil {
-		ep.cfg.lg.Info("starting lazyfs...", zap.String("name", ep.cfg.Name))
-		err := ep.lazyfs.Start(ctx)
-		if err != nil {
-			return err
-		}
-	}
-
 	ep.cfg.lg.Info("starting server...", zap.String("name", ep.cfg.Name))
-	proc, err := SpawnCmdWithLogger(ep.cfg.lg, append([]string{ep.cfg.ExecPath}, ep.cfg.Args...), ep.cfg.EnvVars, ep.cfg.Name)
+	proc, err := SpawnCmdWithLogger(ep.cfg.lg, append([]string{ep.cfg.ExecPath}, ep.cfg.Args...), ep.cfg.EnvVars)
 	if err != nil {
 		return err
 	}
 	ep.proc = proc
-	err = ep.waitReady(ctx)
+	err = ep.waitReady()
 	if err == nil {
-		ep.cfg.lg.Info("started server.", zap.String("name", ep.cfg.Name), zap.Int("pid", ep.proc.Pid()))
+		ep.cfg.lg.Info("started server.", zap.String("name", ep.cfg.Name))
 	}
 	return err
 }
 
-func (ep *EtcdServerProcess) Restart(ctx context.Context) error {
-	ep.cfg.lg.Info("restarting server...", zap.String("name", ep.cfg.Name))
+func (ep *EtcdServerProcess) Restart() error {
+	ep.cfg.lg.Info("restaring server...", zap.String("name", ep.cfg.Name))
 	if err := ep.Stop(); err != nil {
 		return err
 	}
-	err := ep.Start(ctx)
+	ep.donec = make(chan struct{})
+	err := ep.Start()
 	if err == nil {
-		ep.cfg.lg.Info("restarted server", zap.String("name", ep.cfg.Name))
+		ep.cfg.lg.Info("restared server", zap.String("name", ep.cfg.Name))
 	}
 	return err
 }
 
 func (ep *EtcdServerProcess) Stop() (err error) {
+	ep.cfg.lg.Info("stoping server...", zap.String("name", ep.cfg.Name))
 	if ep == nil || ep.proc == nil {
 		return nil
 	}
-
-	ep.cfg.lg.Info("stopping server...", zap.String("name", ep.cfg.Name))
-
-	defer func() {
-		ep.proc = nil
-	}()
-
 	err = ep.proc.Stop()
 	if err != nil {
 		return err
 	}
-	err = ep.proc.Close()
-	if err != nil && !strings.Contains(err.Error(), "unexpected exit code") {
-		return err
-	}
+	ep.proc = nil
 	<-ep.donec
 	ep.donec = make(chan struct{})
-	if ep.cfg.PeerURL.Scheme == "unix" || ep.cfg.PeerURL.Scheme == "unixs" {
-		err = os.Remove(ep.cfg.PeerURL.Host + ep.cfg.PeerURL.Path)
+	if ep.cfg.Purl.Scheme == "unix" || ep.cfg.Purl.Scheme == "unixs" {
+		err = os.Remove(ep.cfg.Purl.Host + ep.cfg.Purl.Path)
 		if err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -229,14 +200,6 @@ func (ep *EtcdServerProcess) Stop() (err error) {
 			return err
 		}
 	}
-	if ep.lazyfs != nil {
-		ep.cfg.lg.Info("stopping lazyfs...", zap.String("name", ep.cfg.Name))
-		err = ep.lazyfs.Stop()
-		ep.lazyfs = nil
-		if err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -245,7 +208,6 @@ func (ep *EtcdServerProcess) Close() error {
 	if err := ep.Stop(); err != nil {
 		return err
 	}
-
 	if !ep.cfg.KeepDataDir {
 		ep.cfg.lg.Info("removing directory", zap.String("data-dir", ep.cfg.DataDirPath))
 		return os.RemoveAll(ep.cfg.DataDirPath)
@@ -253,78 +215,29 @@ func (ep *EtcdServerProcess) Close() error {
 	return nil
 }
 
-func (ep *EtcdServerProcess) waitReady(ctx context.Context) error {
+func (ep *EtcdServerProcess) WithStopSignal(sig os.Signal) os.Signal {
+	ret := ep.proc.StopSignal
+	ep.proc.StopSignal = sig
+	return ret
+}
+
+func (ep *EtcdServerProcess) waitReady() error {
 	defer close(ep.donec)
-	err := WaitReadyExpectProc(ctx, ep.proc, EtcdServerReadyLines)
-	if err != nil {
-		return fmt.Errorf("failed to find etcd ready lines %q, err: %w", EtcdServerReadyLines, err)
-	}
-	return nil
+	return WaitReadyExpectProc(ep.proc, EtcdServerReadyLines)
 }
 
 func (ep *EtcdServerProcess) Config() *EtcdServerProcessConfig { return ep.cfg }
 
 func (ep *EtcdServerProcess) Logs() LogsExpect {
 	if ep.proc == nil {
-		ep.cfg.lg.Panic("Please grab logs before process is stopped")
+		ep.cfg.lg.Panic("Please grap logs before process is stopped")
 	}
 	return ep.proc
 }
 
-func (ep *EtcdServerProcess) Kill() error {
-	ep.cfg.lg.Info("killing server...", zap.String("name", ep.cfg.Name))
-	return ep.proc.Signal(syscall.SIGKILL)
-}
-
-func (ep *EtcdServerProcess) Wait(ctx context.Context) error {
-	ch := make(chan struct{})
-	go func() {
-		defer close(ch)
-		if ep.proc != nil {
-			ep.proc.Wait()
-
-			exitCode, exitErr := ep.proc.ExitCode()
-
-			ep.cfg.lg.Info("server exited",
-				zap.String("name", ep.cfg.Name),
-				zap.Int("code", exitCode),
-				zap.Error(exitErr),
-			)
-		}
-	}()
-	select {
-	case <-ch:
-		ep.proc = nil
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (ep *EtcdServerProcess) IsRunning() bool {
-	if ep.proc == nil {
-		return false
-	}
-
-	exitCode, err := ep.proc.ExitCode()
-	if err == expect.ErrProcessRunning {
-		return true
-	}
-
-	ep.cfg.lg.Info("server exited",
-		zap.String("name", ep.cfg.Name),
-		zap.Int("code", exitCode),
-		zap.Error(err))
-	ep.proc = nil
-	return false
-}
-
 func AssertProcessLogs(t *testing.T, ep EtcdProcess, expectLog string) {
 	t.Helper()
-	var err error
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	_, err = ep.Logs().ExpectWithContext(ctx, expect.ExpectedResponse{Value: expectLog})
+	_, err := ep.Logs().Expect(expectLog)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,12 +247,27 @@ func (ep *EtcdServerProcess) PeerProxy() proxy.Server {
 	return ep.proxy
 }
 
-func (ep *EtcdServerProcess) LazyFS() *LazyFS {
-	return ep.lazyfs
-}
-
 func (ep *EtcdServerProcess) Failpoints() *BinaryFailpoints {
 	return ep.failpoints
+}
+
+func (ep *EtcdServerProcess) IsRunning() bool {
+	if ep.proc == nil {
+		return false
+	}
+
+	if ep.proc.IsRunning() {
+		return true
+	}
+
+	ep.cfg.lg.Info("server exited",
+		zap.String("name", ep.cfg.Name))
+	ep.proc = nil
+	return false
+}
+
+func (ep *EtcdServerProcess) Etcdctl(connType ClientConnType, isAutoTLS, v2 bool) *Etcdctl {
+	return NewEtcdctl(ep.EndpointsV3(), connType, isAutoTLS, v2)
 }
 
 type BinaryFailpoints struct {
@@ -358,12 +286,12 @@ func (f *BinaryFailpoints) SetupEnv(failpoint, payload string) error {
 
 func (f *BinaryFailpoints) SetupHTTP(ctx context.Context, failpoint, payload string) error {
 	host := fmt.Sprintf("127.0.0.1:%d", f.member.Config().GoFailPort)
-	failpointURL := url.URL{
+	failpointUrl := url.URL{
 		Scheme: "http",
 		Host:   host,
 		Path:   failpoint,
 	}
-	r, err := http.NewRequestWithContext(ctx, "PUT", failpointURL.String(), bytes.NewBuffer([]byte(payload)))
+	r, err := http.NewRequestWithContext(ctx, "PUT", failpointUrl.String(), bytes.NewBuffer([]byte(payload)))
 	if err != nil {
 		return err
 	}
@@ -379,28 +307,24 @@ func (f *BinaryFailpoints) SetupHTTP(ctx context.Context, failpoint, payload str
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		errMsg, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("bad status code: %d, err: %w", resp.StatusCode, err)
-		}
-		return fmt.Errorf("bad status code: %d, err: %s", resp.StatusCode, errMsg)
+		return fmt.Errorf("bad status code: %d", resp.StatusCode)
 	}
 	return nil
 }
 
 func (f *BinaryFailpoints) DeactivateHTTP(ctx context.Context, failpoint string) error {
 	host := fmt.Sprintf("127.0.0.1:%d", f.member.Config().GoFailPort)
-	failpointURL := url.URL{
+	failpointUrl := url.URL{
 		Scheme: "http",
 		Host:   host,
 		Path:   failpoint,
 	}
-	r, err := http.NewRequestWithContext(ctx, "DELETE", failpointURL.String(), nil)
+	r, err := http.NewRequestWithContext(ctx, "DELETE", failpointUrl.String(), nil)
 	if err != nil {
 		return err
 	}
 	httpClient := http.Client{
-		Timeout: time.Second,
+		Timeout: 1 * time.Second,
 	}
 	if f.clientTimeout != 0 {
 		httpClient.Timeout = f.clientTimeout
@@ -411,18 +335,17 @@ func (f *BinaryFailpoints) DeactivateHTTP(ctx context.Context, failpoint string)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		errMsg, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("bad status code: %d, err: %w", resp.StatusCode, err)
-		}
-		return fmt.Errorf("bad status code: %d, err: %s", resp.StatusCode, errMsg)
+		return fmt.Errorf("bad status code: %d", resp.StatusCode)
 	}
 	return nil
 }
 
 func (f *BinaryFailpoints) Enabled() bool {
 	_, err := failpoints(f.member)
-	return err == nil
+	if err != nil {
+		return false
+	}
+	return true
 }
 
 func (f *BinaryFailpoints) Available(failpoint string) bool {
@@ -448,21 +371,17 @@ func failpoints(member EtcdProcess) (map[string]string, error) {
 
 func fetchFailpointsBody(member EtcdProcess) (io.ReadCloser, error) {
 	address := fmt.Sprintf("127.0.0.1:%d", member.Config().GoFailPort)
-	failpointURL := url.URL{
+	failpointUrl := url.URL{
 		Scheme: "http",
 		Host:   address,
 	}
-	resp, err := http.Get(failpointURL.String())
+	resp, err := http.Get(failpointUrl.String())
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		errMsg, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("invalid status code: %d, err: %w", resp.StatusCode, err)
-		}
-		return nil, fmt.Errorf("invalid status code: %d, err:%s", resp.StatusCode, errMsg)
+		resp.Body.Close()
+		return nil, fmt.Errorf("invalid status code, %d", resp.StatusCode)
 	}
 	return resp.Body, nil
 }
@@ -488,10 +407,7 @@ func parseFailpointsBody(body io.Reader) (map[string]string, error) {
 	return failpoints, nil
 }
 
-var GetVersionFromBinary = func(binaryPath string) (*semver.Version, error) {
-	if !fileutil.Exist(binaryPath) {
-		return nil, fmt.Errorf("binary path does not exist: %s", binaryPath)
-	}
+func GetVersionFromBinary(binaryPath string) (*semver.Version, error) {
 	lines, err := RunUtilCompletion([]string{binaryPath, "--version"}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("could not find binary version from %s, err: %w", binaryPath, err)
@@ -513,23 +429,4 @@ var GetVersionFromBinary = func(binaryPath string) (*semver.Version, error) {
 	}
 
 	return nil, fmt.Errorf("could not find version in binary output of %s, lines outputted were %v", binaryPath, lines)
-}
-
-// setGetVersionFromBinary changes the GetVersionFromBinary function to a mock in testing.
-func setGetVersionFromBinary(tb testing.TB, f func(binaryPath string) (*semver.Version, error)) {
-	origGetVersionFromBinary := GetVersionFromBinary
-	GetVersionFromBinary = f
-	tb.Cleanup(func() {
-		GetVersionFromBinary = origGetVersionFromBinary
-	})
-}
-
-func CouldSetSnapshotCatchupEntries(execPath string) bool {
-	v, err := GetVersionFromBinary(execPath)
-	if err != nil {
-		return false
-	}
-	// snapshot-catchup-entries flag was backported in https://github.com/etcd-io/etcd/pull/17808
-	v3_5_14 := semver.Version{Major: 3, Minor: 5, Patch: 14}
-	return v.Compare(v3_5_14) >= 0
 }

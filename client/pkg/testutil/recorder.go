@@ -23,7 +23,7 @@ import (
 
 type Action struct {
 	Name   string
-	Params []any
+	Params []interface{}
 }
 
 type Recorder interface {
@@ -87,7 +87,7 @@ type recorderStream struct {
 }
 
 func NewRecorderStream() Recorder {
-	return NewRecorderStreamWithWaitTimout(5 * time.Second)
+	return NewRecorderStreamWithWaitTimout(time.Duration(5 * time.Second))
 }
 
 func NewRecorderStreamWithWaitTimout(waitTimeout time.Duration) Recorder {

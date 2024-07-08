@@ -22,20 +22,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
-	"go.etcd.io/etcd/server/v3/storage"
-	"go.etcd.io/etcd/tests/v3/framework/integration"
-
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/server/v3/etcdserver"
 )
 
 // TestMetricDbSizeBoot checks that the db size metric is set on boot.
 func TestMetricDbSizeBoot(t *testing.T) {
-	integration.BeforeTest(t)
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	BeforeTest(t)
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	v, err := clus.Members[0].Metric("etcd_debugging_mvcc_db_total_size_in_bytes")
@@ -54,12 +49,12 @@ func TestMetricDbSizeDefrag(t *testing.T) {
 
 // testMetricDbSizeDefrag checks that the db size metric is set after defrag.
 func testMetricDbSizeDefrag(t *testing.T, name string) {
-	integration.BeforeTest(t)
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	BeforeTest(t)
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
-	kvc := integration.ToGRPC(clus.Client(0)).KV
-	mc := integration.ToGRPC(clus.Client(0)).Maintenance
+	kvc := toGRPC(clus.Client(0)).KV
+	mc := toGRPC(clus.Client(0)).Maintenance
 
 	// expand the db size
 	numPuts := 25 // large enough to write more than 1 page
@@ -106,19 +101,18 @@ func testMetricDbSizeDefrag(t *testing.T, name string) {
 
 	validateAfterCompactionInUse := func() error {
 		// Put to move PendingPages to FreePages
-		_, verr := kvc.Put(context.TODO(), putreq)
-		if verr != nil {
-			t.Fatal(verr)
+		if _, err = kvc.Put(context.TODO(), putreq); err != nil {
+			t.Fatal(err)
 		}
 		time.Sleep(500 * time.Millisecond)
 
-		afterCompactionInUse, verr := clus.Members[0].Metric("etcd_mvcc_db_total_size_in_use_in_bytes")
-		if verr != nil {
-			t.Fatal(verr)
+		afterCompactionInUse, err := clus.Members[0].Metric("etcd_mvcc_db_total_size_in_use_in_bytes")
+		if err != nil {
+			t.Fatal(err)
 		}
-		aciu, verr := strconv.Atoi(afterCompactionInUse)
-		if verr != nil {
-			t.Fatal(verr)
+		aciu, err := strconv.Atoi(afterCompactionInUse)
+		if err != nil {
+			t.Fatal(err)
 		}
 		if biu <= aciu {
 			return fmt.Errorf("expected less than %d, got %d after compaction", biu, aciu)
@@ -130,7 +124,7 @@ func testMetricDbSizeDefrag(t *testing.T, name string) {
 	// which causes the result to be flaky. Retry 3 times.
 	maxRetry, retry := 3, 0
 	for {
-		err = validateAfterCompactionInUse()
+		err := validateAfterCompactionInUse()
 		if err == nil {
 			break
 		}
@@ -169,8 +163,8 @@ func testMetricDbSizeDefrag(t *testing.T, name string) {
 }
 
 func TestMetricQuotaBackendBytes(t *testing.T) {
-	integration.BeforeTest(t)
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	BeforeTest(t)
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	qs, err := clus.Members[0].Metric("etcd_server_quota_backend_bytes")
@@ -181,14 +175,14 @@ func TestMetricQuotaBackendBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if int64(qv) != storage.DefaultQuotaBytes {
-		t.Fatalf("expected %d, got %f", storage.DefaultQuotaBytes, qv)
+	if int64(qv) != etcdserver.DefaultQuotaBytes {
+		t.Fatalf("expected %d, got %f", etcdserver.DefaultQuotaBytes, qv)
 	}
 }
 
 func TestMetricsHealth(t *testing.T) {
-	integration.BeforeTest(t)
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	BeforeTest(t)
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	tr, err := transport.NewTransport(transport.TLSInfo{}, 5*time.Second)
@@ -214,34 +208,4 @@ func TestMetricsHealth(t *testing.T) {
 	if hv != "0" {
 		t.Fatalf("expected '0' from etcd_server_health_failures, got %q", hv)
 	}
-}
-
-func TestMetricsRangeDurationSeconds(t *testing.T) {
-	integration.BeforeTest(t)
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
-	defer clus.Terminate(t)
-
-	client := clus.RandClient()
-
-	keys := []string{
-		"my-namespace/foobar", "my-namespace/foobar1", "namespace/foobar1"}
-	for _, key := range keys {
-		_, err := client.Put(context.Background(), key, "data")
-		require.NoError(t, err)
-	}
-
-	_, err := client.Get(context.Background(), "", clientv3.WithFromKey())
-	require.NoError(t, err)
-
-	rangeDurationSeconds, err := clus.Members[0].Metric("etcd_server_range_duration_seconds")
-	require.NoError(t, err)
-
-	require.NotEmpty(t, rangeDurationSeconds, "expected a number from etcd_server_range_duration_seconds")
-
-	rangeDuration, err := strconv.ParseFloat(rangeDurationSeconds, 64)
-	require.NoError(t, err, "failed to parse duration: %s", err)
-
-	maxRangeDuration := 600.0
-	require.GreaterOrEqual(t, rangeDuration, 0.0, "expected etcd_server_range_duration_seconds to be between 0 and %f, got %f", maxRangeDuration, rangeDuration)
-	require.LessOrEqual(t, rangeDuration, maxRangeDuration, "expected etcd_server_range_duration_seconds to be between 0 and %f, got %f", maxRangeDuration, rangeDuration)
 }

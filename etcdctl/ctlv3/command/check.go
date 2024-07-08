@@ -26,13 +26,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cheggaaa/pb/v3"
-	"github.com/spf13/cobra"
-	"golang.org/x/time/rate"
-
 	v3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 	"go.etcd.io/etcd/pkg/v3/report"
+
+	"github.com/spf13/cobra"
+	"golang.org/x/time/rate"
+	"gopkg.in/cheggaaa/pb.v1"
 )
 
 var (
@@ -126,13 +126,10 @@ func NewCheckPerfCommand() *cobra.Command {
 	}
 
 	// TODO: support customized configuration
-	cmd.Flags().StringVar(&checkPerfLoad, "load", "s", "The performance check's workload model. Accepted workloads: s(small), m(medium), l(large), xl(xLarge). Different workload models use different configurations in terms of number of clients and expected throughput.")
+	cmd.Flags().StringVar(&checkPerfLoad, "load", "s", "The performance check's workload model. Accepted workloads: s(small), m(medium), l(large), xl(xLarge)")
 	cmd.Flags().StringVar(&checkPerfPrefix, "prefix", "/etcdctl-check-perf/", "The prefix for writing the performance check's keys.")
 	cmd.Flags().BoolVar(&autoCompact, "auto-compact", false, "Compact storage with last revision after test is finished.")
 	cmd.Flags().BoolVar(&autoDefrag, "auto-defrag", false, "Defragment storage after test is finished.")
-	cmd.RegisterFlagCompletionFunc("load", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return []string{"small", "medium", "large", "xLarge"}, cobra.ShellCompDirectiveDefault
-	})
 
 	return cmd
 }
@@ -158,7 +155,7 @@ func newCheckPerfCommand(cmd *cobra.Command, args []string) {
 	cc := clientConfigFromCmd(cmd)
 	clients := make([]*v3.Client, cfg.clients)
 	for i := 0; i < cfg.clients; i++ {
-		clients[i] = mustClient(cc)
+		clients[i] = cc.mustClient()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.duration)*time.Second)
@@ -180,6 +177,7 @@ func newCheckPerfCommand(cmd *cobra.Command, args []string) {
 	k, v := make([]byte, ksize), string(make([]byte, vsize))
 
 	bar := pb.New(cfg.duration)
+	bar.Format("Bom !")
 	bar.Start()
 
 	r := report.NewReport("%4.4f")
@@ -330,7 +328,7 @@ func newCheckDatascaleCommand(cmd *cobra.Command, args []string) {
 	cc := clientConfigFromCmd(cmd)
 	clients := make([]*v3.Client, cfg.clients)
 	for i := 0; i < cfg.clients; i++ {
-		clients[i] = mustClient(cc)
+		clients[i] = cc.mustClient()
 	}
 
 	// get endpoints
@@ -365,8 +363,9 @@ func newCheckDatascaleCommand(cmd *cobra.Command, args []string) {
 		os.Exit(cobrautl.ExitError)
 	}
 
-	fmt.Printf("Start data scale check for work load [%v key-value pairs, %v bytes per key-value, %v concurrent clients].\n", cfg.limit, cfg.kvSize, cfg.clients)
+	fmt.Println(fmt.Sprintf("Start data scale check for work load [%v key-value pairs, %v bytes per key-value, %v concurrent clients].", cfg.limit, cfg.kvSize, cfg.clients))
 	bar := pb.New(cfg.limit)
+	bar.Format("Bom !")
 	bar.Start()
 
 	for i := range clients {
@@ -435,6 +434,6 @@ func newCheckDatascaleCommand(cmd *cobra.Command, args []string) {
 		}
 		os.Exit(cobrautl.ExitError)
 	} else {
-		fmt.Printf("PASS: Approximate system memory used : %v MB.\n", strconv.FormatFloat(mbUsed, 'f', 2, 64))
+		fmt.Println(fmt.Sprintf("PASS: Approximate system memory used : %v MB.", strconv.FormatFloat(mbUsed, 'f', 2, 64)))
 	}
 }

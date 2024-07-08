@@ -59,10 +59,6 @@ The snapshot restore options closely resemble to those used in the `etcd` comman
 
 - skip-hash-check -- Ignore snapshot integrity hash value (required if copied from data directory)
 
-- bump-revision -- How much to increase the latest revision after restore
-
-- mark-compacted -- Mark the latest revision after restore as the point of scheduled compaction (required if --bump-revision > 0, disallowed otherwise)
-
 #### Output
 
 A new etcd data directory initialized with the snapshot.
@@ -71,18 +67,17 @@ A new etcd data directory initialized with the snapshot.
 
 Save a snapshot, restore into a new 3 node cluster, and start the cluster:
 ```
-# save snapshot
-./etcdctl snapshot save snapshot.db
+./etcdutl snapshot save snapshot.db
 
 # restore members
-./etcdutl snapshot restore snapshot.db --initial-cluster-token etcd-cluster-1 --initial-advertise-peer-urls http://127.0.0.1:12380  --name sshot1 --initial-cluster 'sshot1=http://127.0.0.1:12380,sshot2=http://127.0.0.1:22380,sshot3=http://127.0.0.1:32380'
-./etcdutl snapshot restore snapshot.db --initial-cluster-token etcd-cluster-1 --initial-advertise-peer-urls http://127.0.0.1:22380  --name sshot2 --initial-cluster 'sshot1=http://127.0.0.1:12380,sshot2=http://127.0.0.1:22380,sshot3=http://127.0.0.1:32380'
-./etcdutl snapshot restore snapshot.db --initial-cluster-token etcd-cluster-1 --initial-advertise-peer-urls http://127.0.0.1:32380  --name sshot3 --initial-cluster 'sshot1=http://127.0.0.1:12380,sshot2=http://127.0.0.1:22380,sshot3=http://127.0.0.1:32380'
+bin/etcdutl snapshot restore snapshot.db --initial-cluster-token etcd-cluster-1 --initial-advertise-peer-urls http://127.0.0.1:12380  --name sshot1 --initial-cluster 'sshot1=http://127.0.0.1:12380,sshot2=http://127.0.0.1:22380,sshot3=http://127.0.0.1:32380'
+bin/etcdutl snapshot restore snapshot.db --initial-cluster-token etcd-cluster-1 --initial-advertise-peer-urls http://127.0.0.1:22380  --name sshot2 --initial-cluster 'sshot1=http://127.0.0.1:12380,sshot2=http://127.0.0.1:22380,sshot3=http://127.0.0.1:32380'
+bin/etcdutl snapshot restore snapshot.db --initial-cluster-token etcd-cluster-1 --initial-advertise-peer-urls http://127.0.0.1:32380  --name sshot3 --initial-cluster 'sshot1=http://127.0.0.1:12380,sshot2=http://127.0.0.1:22380,sshot3=http://127.0.0.1:32380'
 
 # launch members
-./etcd --name sshot1 --listen-client-urls http://127.0.0.1:2379 --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://127.0.0.1:12380 &
-./etcd --name sshot2 --listen-client-urls http://127.0.0.1:22379 --advertise-client-urls http://127.0.0.1:22379 --listen-peer-urls http://127.0.0.1:22380 &
-./etcd --name sshot3 --listen-client-urls http://127.0.0.1:32379 --advertise-client-urls http://127.0.0.1:32379 --listen-peer-urls http://127.0.0.1:32380 &
+bin/etcd --name sshot1 --listen-client-urls http://127.0.0.1:2379 --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://127.0.0.1:12380 &
+bin/etcd --name sshot2 --listen-client-urls http://127.0.0.1:22379 --advertise-client-urls http://127.0.0.1:22379 --listen-peer-urls http://127.0.0.1:22380 &
+bin/etcd --name sshot3 --listen-client-urls http://127.0.0.1:32379 --advertise-client-urls http://127.0.0.1:32379 --listen-peer-urls http://127.0.0.1:32380 &
 ```
 
 ### SNAPSHOT STATUS \<filename\>
@@ -119,44 +114,6 @@ Prints a line of JSON encoding the database hash, revision, total keys, and size
 +----------+----------+------------+------------+
 ```
 
-### HASHKV [options] \<filename\>
-
-HASHKV prints hash of keys and values up to given revision.
-
-#### Options
-
-- rev -- Revision number. Default is 0 which means the latest revision.
-
-#### Output
-
-##### Simple format
-
-Prints a humanized table of the KV hash, hash revision and compact revision.
-
-##### JSON format
-
-Prints a line of JSON encoding the KV hash, hash revision and compact revision.
-
-#### Examples
-```bash
-./etcdutl hashkv file.db
-# 35c86e9b, 214, 150
-```
-
-```bash
-./etcdutl --write-out=json hashkv file.db
-# {"hash":902327963,"hashRevision":214,"compactRevision":150}
-```
-
-```bash
-./etcdutl --write-out=table hashkv file.db
-+----------+---------------+------------------+
-|   HASH   | HASH REVISION | COMPACT REVISION |
-+----------+---------------+------------------+
-| 35c86e9b |           214 |              150 |
-+----------+---------------+------------------+
-```
-
 ### VERSION
 
 Prints the version of etcdutl.
@@ -167,6 +124,21 @@ Prints etcd version and API version.
 
 #### Examples
 
+```bash
+./etcdutl version
+# etcdutl version: 3.1.0-alpha.0+git
+# API version: 3.1
+```
+
+### VERSION
+
+Prints the version of etcdctl.
+
+#### Output
+
+Prints etcd version and API version.
+
+#### Examples
 
 ```bash
 ./etcdutl version

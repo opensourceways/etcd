@@ -17,14 +17,39 @@ package osutil
 import (
 	"os"
 	"os/signal"
+	"reflect"
 	"syscall"
 	"testing"
 	"time"
 
-	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap"
 )
 
 func init() { setDflSignal = func(syscall.Signal) {} }
+
+func TestUnsetenv(t *testing.T) {
+	tests := []string{
+		"data",
+		"space data",
+		"equal=data",
+	}
+	for i, tt := range tests {
+		key := "ETCD_UNSETENV_TEST"
+		if os.Getenv(key) != "" {
+			t.Fatalf("#%d: cannot get empty %s", i, key)
+		}
+		env := os.Environ()
+		if err := os.Setenv(key, tt); err != nil {
+			t.Fatalf("#%d: cannot set %s: %v", i, key, err)
+		}
+		if err := Unsetenv(key); err != nil {
+			t.Errorf("#%d: unsetenv %s error: %v", i, key, err)
+		}
+		if g := os.Environ(); !reflect.DeepEqual(g, env) {
+			t.Errorf("#%d: env = %+v, want %+v", i, g, env)
+		}
+	}
+}
 
 func waitSig(t *testing.T, c <-chan os.Signal, sig os.Signal) {
 	select {
@@ -46,7 +71,7 @@ func TestHandleInterrupts(t *testing.T) {
 		c := make(chan os.Signal, 2)
 		signal.Notify(c, sig)
 
-		HandleInterrupts(zaptest.NewLogger(t))
+		HandleInterrupts(zap.NewExample())
 		syscall.Kill(syscall.Getpid(), sig)
 
 		// we should receive the signal once from our own kill and

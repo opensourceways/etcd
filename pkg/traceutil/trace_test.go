@@ -18,12 +18,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"go.etcd.io/etcd/client/pkg/v3/logutil"
+	"go.uber.org/zap"
 )
 
 func TestGet(t *testing.T) {
@@ -40,7 +41,7 @@ func TestGet(t *testing.T) {
 		},
 		{
 			name:        "When the context has trace",
-			inputCtx:    context.WithValue(context.Background(), TraceKey{}, traceForTest),
+			inputCtx:    context.WithValue(context.Background(), TraceKey, traceForTest),
 			outputTrace: traceForTest,
 		},
 	}
@@ -51,7 +52,7 @@ func TestGet(t *testing.T) {
 			if trace == nil {
 				t.Errorf("Expected %v; Got nil", tt.outputTrace)
 			}
-			if tt.outputTrace == nil || trace.operation != tt.outputTrace.operation {
+			if trace.operation != tt.outputTrace.operation {
 				t.Errorf("Expected %v; Got %v", tt.outputTrace, trace)
 			}
 		})
@@ -204,7 +205,7 @@ func TestLog(t *testing.T) {
 			logPath := filepath.Join(os.TempDir(), fmt.Sprintf("test-log-%d", time.Now().UnixNano()))
 			defer os.RemoveAll(logPath)
 
-			lcfg := logutil.DefaultZapLoggerConfig
+			lcfg := zap.NewProductionConfig()
 			lcfg.OutputPaths = []string{logPath}
 			lcfg.ErrorOutputPaths = []string{logPath}
 			lg, _ := lcfg.Build()
@@ -214,7 +215,7 @@ func TestLog(t *testing.T) {
 			}
 			tt.trace.lg = lg
 			tt.trace.Log()
-			data, err := os.ReadFile(logPath)
+			data, err := ioutil.ReadFile(logPath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -237,7 +238,7 @@ func TestLogIfLong(t *testing.T) {
 	}{
 		{
 			name:      "When the duration is smaller than threshold",
-			threshold: 200 * time.Millisecond,
+			threshold: time.Duration(200 * time.Millisecond),
 			trace: &Trace{
 				operation: "Test",
 				startTime: time.Now().Add(-100 * time.Millisecond),
@@ -250,7 +251,7 @@ func TestLogIfLong(t *testing.T) {
 		},
 		{
 			name:      "When the duration is longer than threshold",
-			threshold: 50 * time.Millisecond,
+			threshold: time.Duration(50 * time.Millisecond),
 			trace: &Trace{
 				operation: "Test",
 				startTime: time.Now().Add(-100 * time.Millisecond),
@@ -265,7 +266,7 @@ func TestLogIfLong(t *testing.T) {
 		},
 		{
 			name:      "When not all steps are longer than step threshold",
-			threshold: 50 * time.Millisecond,
+			threshold: time.Duration(50 * time.Millisecond),
 			trace: &Trace{
 				operation: "Test",
 				startTime: time.Now().Add(-100 * time.Millisecond),
@@ -285,14 +286,14 @@ func TestLogIfLong(t *testing.T) {
 			logPath := filepath.Join(os.TempDir(), fmt.Sprintf("test-log-%d", time.Now().UnixNano()))
 			defer os.RemoveAll(logPath)
 
-			lcfg := logutil.DefaultZapLoggerConfig
+			lcfg := zap.NewProductionConfig()
 			lcfg.OutputPaths = []string{logPath}
 			lcfg.ErrorOutputPaths = []string{logPath}
 			lg, _ := lcfg.Build()
 
 			tt.trace.lg = lg
 			tt.trace.LogIfLong(tt.threshold)
-			data, err := os.ReadFile(logPath)
+			data, err := ioutil.ReadFile(logPath)
 			if err != nil {
 				t.Fatal(err)
 			}

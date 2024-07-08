@@ -33,6 +33,7 @@ var (
 // GetCluster gets the cluster information via DNS discovery.
 // Also sees each entry as a separate instance.
 func GetCluster(serviceScheme, service, name, dns string, apurls types.URLs) ([]string, error) {
+	tempName := int(0)
 	tcp2ap := make(map[string]url.URL)
 
 	// First, resolve the apurls
@@ -44,10 +45,7 @@ func GetCluster(serviceScheme, service, name, dns string, apurls types.URLs) ([]
 		tcp2ap[tcpAddr.String()] = url
 	}
 
-	var (
-		tempName    int
-		stringParts []string
-	)
+	stringParts := []string{}
 	updateNodeMap := func(service, scheme string) error {
 		_, addrs, err := lookupSRV(service, "tcp", dns)
 		if err != nil {
@@ -99,10 +97,8 @@ type SRVClients struct {
 
 // GetClient looks up the client endpoints for a service and domain.
 func GetClient(service, domain string, serviceName string) (*SRVClients, error) {
-	var (
-		urls []*url.URL
-		srvs []*net.SRV
-	)
+	var urls []*url.URL
+	var srvs []*net.SRV
 
 	updateURLs := func(service, scheme string) error {
 		_, addrs, err := lookupSRV(service, "tcp", domain)

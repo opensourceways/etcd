@@ -23,12 +23,6 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 )
 
-func ExecuteWithTimeout(t *testing.T, timeout time.Duration, f func()) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	ExecuteUntil(ctx, t, f)
-}
-
 func ExecuteUntil(ctx context.Context, t *testing.T, f func()) {
 	deadline, deadlineSet := ctx.Deadline()
 	timeout := time.Until(deadline)

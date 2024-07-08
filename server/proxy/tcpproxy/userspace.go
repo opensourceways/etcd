@@ -75,11 +75,11 @@ func (tp *TCPProxy) Run() error {
 		tp.MonitorInterval = 5 * time.Minute
 	}
 	for _, srv := range tp.Endpoints {
-		addr := net.JoinHostPort(srv.Target, fmt.Sprintf("%d", srv.Port))
+		addr := fmt.Sprintf("%s:%d", srv.Target, srv.Port)
 		tp.remotes = append(tp.remotes, &remote{srv: srv, addr: addr})
 	}
 
-	var eps []string
+	eps := []string{}
 	for _, ep := range tp.Endpoints {
 		eps = append(eps, fmt.Sprintf("%s:%d", ep.Target, ep.Port))
 	}

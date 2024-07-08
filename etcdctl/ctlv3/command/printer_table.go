@@ -17,9 +17,9 @@ package command
 import (
 	"os"
 
-	"github.com/olekukonko/tablewriter"
-
 	v3 "go.etcd.io/etcd/client/v3"
+
+	"github.com/olekukonko/tablewriter"
 )
 
 type tablePrinter struct{ printer }

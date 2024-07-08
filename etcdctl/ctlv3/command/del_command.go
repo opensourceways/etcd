@@ -17,10 +17,8 @@ package command
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
-
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 )
@@ -68,7 +66,7 @@ func getDelOp(args []string) (string, []clientv3.OpOption) {
 		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("`--prefix` and `--from-key` cannot be set at the same time, choose one"))
 	}
 
-	var opts []clientv3.OpOption
+	opts := []clientv3.OpOption{}
 	key := args[0]
 	if len(args) > 1 {
 		if delPrefix || delFromKey {
@@ -76,9 +74,7 @@ func getDelOp(args []string) (string, []clientv3.OpOption) {
 		}
 		opts = append(opts, clientv3.WithRange(args[1]))
 		if !delRange {
-			fmt.Fprintf(os.Stderr, "Warning: Keys between %q and %q will be deleted. Please interrupt the command within next 2 seconds to cancel. "+
-				"You can provide `--range` flag to avoid the delay.\n", args[0], args[1])
-			time.Sleep(2 * time.Second)
+			fmt.Fprintln(os.Stderr, "In etcd v3.6, the operation will be suspended for a few seconds to provide the user time to verify range.")
 		}
 	}
 

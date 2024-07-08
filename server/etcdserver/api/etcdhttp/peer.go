@@ -21,15 +21,14 @@ import (
 	"strconv"
 	"strings"
 
-	"go.uber.org/zap"
-
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/etcdserver/api"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
-	"go.etcd.io/etcd/server/v3/etcdserver/errors"
 	"go.etcd.io/etcd/server/v3/lease/leasehttp"
+
+	"go.uber.org/zap"
 )
 
 const (
@@ -72,7 +71,7 @@ func newPeerHandler(
 	if hashKVHandler != nil {
 		mux.Handle(etcdserver.PeerHashKVPath, hashKVHandler)
 	}
-	mux.HandleFunc(versionPath, versionHandler(s, serveVersion))
+	mux.HandleFunc(versionPath, versionHandler(s.Cluster(), serveVersion))
 	return mux
 }
 
@@ -143,10 +142,10 @@ func (h *peerMemberPromoteHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 			http.Error(w, err.Error(), http.StatusNotFound)
 		case membership.ErrMemberNotLearner:
 			http.Error(w, err.Error(), http.StatusPreconditionFailed)
-		case errors.ErrLearnerNotReady:
+		case etcdserver.ErrLearnerNotReady:
 			http.Error(w, err.Error(), http.StatusPreconditionFailed)
 		default:
-			writeError(h.lg, w, r, err)
+			WriteError(h.lg, w, r, err)
 		}
 		h.lg.Warn(
 			"failed to promote a member",

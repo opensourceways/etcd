@@ -15,6 +15,7 @@
 package yaml
 
 import (
+	"io/ioutil"
 	"log"
 	"os"
 	"reflect"
@@ -72,7 +73,7 @@ func TestConfigFromFile(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		tmpfile, err := os.CreateTemp("", "clientcfg")
+		tmpfile, err := ioutil.TempFile("", "clientcfg")
 		if err != nil {
 			log.Fatal(err)
 		}

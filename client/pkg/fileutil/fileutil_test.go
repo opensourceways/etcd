@@ -17,6 +17,7 @@ package fileutil
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"math/rand"
 	"os"
 	"os/user"
@@ -26,16 +27,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap/zaptest"
 )
 
 func TestIsDirWriteable(t *testing.T) {
-	tmpdir := t.TempDir()
-	if err := IsDirWriteable(tmpdir); err != nil {
+	tmpdir, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatalf("unexpected ioutil.TempDir error: %v", err)
+	}
+	defer os.RemoveAll(tmpdir)
+	if err = IsDirWriteable(tmpdir); err != nil {
 		t.Fatalf("unexpected IsDirWriteable error: %v", err)
 	}
-	if err := os.Chmod(tmpdir, 0444); err != nil {
+	if err = os.Chmod(tmpdir, 0444); err != nil {
 		t.Fatalf("unexpected os.Chmod error: %v", err)
 	}
 	me, err := user.Current()
@@ -56,18 +60,22 @@ func TestIsDirWriteable(t *testing.T) {
 }
 
 func TestCreateDirAll(t *testing.T) {
-	tmpdir := t.TempDir()
+	tmpdir, err := ioutil.TempDir(os.TempDir(), "foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpdir)
 
 	tmpdir2 := filepath.Join(tmpdir, "testdir")
-	if err := CreateDirAll(zaptest.NewLogger(t), tmpdir2); err != nil {
+	if err = CreateDirAll(zaptest.NewLogger(t), tmpdir2); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(filepath.Join(tmpdir2, "text.txt"), []byte("test text"), PrivateFileMode); err != nil {
+	if err = ioutil.WriteFile(filepath.Join(tmpdir2, "text.txt"), []byte("test text"), PrivateFileMode); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := CreateDirAll(zaptest.NewLogger(t), tmpdir2); err == nil || !strings.Contains(err.Error(), "to be empty, got") {
+	if err = CreateDirAll(zaptest.NewLogger(t), tmpdir2); err == nil || !strings.Contains(err.Error(), "to be empty, got") {
 		t.Fatalf("unexpected error %v", err)
 	}
 }
@@ -83,7 +91,7 @@ func TestExist(t *testing.T) {
 		t.Fatalf("expected Exist true, got %v", Exist(fdir))
 	}
 
-	f, err := os.CreateTemp(os.TempDir(), "fileutil")
+	f, err := ioutil.TempFile(os.TempDir(), "fileutil")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,13 +108,17 @@ func TestExist(t *testing.T) {
 }
 
 func TestDirEmpty(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := ioutil.TempDir(os.TempDir(), "empty_dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
 
 	if !DirEmpty(dir) {
 		t.Fatalf("expected DirEmpty true, got %v", DirEmpty(dir))
 	}
 
-	file, err := os.CreateTemp(dir, "new_file")
+	file, err := ioutil.TempFile(dir, "new_file")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +133,7 @@ func TestDirEmpty(t *testing.T) {
 }
 
 func TestZeroToEnd(t *testing.T) {
-	f, err := os.CreateTemp(os.TempDir(), "fileutil")
+	f, err := ioutil.TempFile(os.TempDir(), "fileutil")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,27 +178,32 @@ func TestZeroToEnd(t *testing.T) {
 }
 
 func TestDirPermission(t *testing.T) {
-	tmpdir := t.TempDir()
+	tmpdir, err := ioutil.TempDir(os.TempDir(), "foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpdir)
 
 	tmpdir2 := filepath.Join(tmpdir, "testpermission")
 	// create a new dir with 0700
-	if err := CreateDirAll(zaptest.NewLogger(t), tmpdir2); err != nil {
+	if err = CreateDirAll(zaptest.NewLogger(t), tmpdir2); err != nil {
 		t.Fatal(err)
 	}
 	// check dir permission with mode different than created dir
-	if err := CheckDirPermission(tmpdir2, 0600); err == nil {
+	if err = CheckDirPermission(tmpdir2, 0600); err == nil {
 		t.Errorf("expected error, got nil")
 	}
 }
 
 func TestRemoveMatchFile(t *testing.T) {
 	tmpdir := t.TempDir()
-	f, err := os.CreateTemp(tmpdir, "tmp")
+	defer os.RemoveAll(tmpdir)
+	f, err := ioutil.TempFile(tmpdir, "tmp")
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.Close()
-	f, err = os.CreateTemp(tmpdir, "foo.tmp")
+	f, err = ioutil.TempFile(tmpdir, "foo.tmp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +223,7 @@ func TestRemoveMatchFile(t *testing.T) {
 		t.Errorf("expected exist 1 files, got %d", len(fnames))
 	}
 
-	f, err = os.CreateTemp(tmpdir, "tmp")
+	f, err = ioutil.TempFile(tmpdir, "tmp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,16 +234,5 @@ func TestRemoveMatchFile(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("expected error, got nil")
-	}
-}
-
-func TestTouchDirAll(t *testing.T) {
-	tmpdir := t.TempDir()
-	assert.Panics(t, func() {
-		TouchDirAll(nil, tmpdir)
-	}, "expected panic with nil log")
-
-	if err := TouchDirAll(zaptest.NewLogger(t), tmpdir); err != nil {
-		t.Fatal(err)
 	}
 }

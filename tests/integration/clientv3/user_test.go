@@ -20,17 +20,16 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
-
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
+	"go.etcd.io/etcd/tests/v3/integration"
+	"google.golang.org/grpc"
 )
 
 func TestUserError(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	authapi := clus.RandClient()
@@ -57,9 +56,9 @@ func TestUserError(t *testing.T) {
 }
 
 func TestAddUserAfterDelete(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	authapi := clus.RandClient()
@@ -70,7 +69,7 @@ func TestAddUserAfterDelete(t *testing.T) {
 		DialOptions: []grpc.DialOption{grpc.WithBlock()},
 	}
 	cfg.Username, cfg.Password = "root", "123"
-	authed, err := integration2.NewClient(t, cfg)
+	authed, err := integration.NewClient(t, cfg)
 	require.NoError(t, err)
 	defer authed.Close()
 
@@ -107,9 +106,9 @@ func TestAddUserAfterDelete(t *testing.T) {
 }
 
 func TestUserErrorAuth(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	authapi := clus.RandClient()
@@ -127,16 +126,16 @@ func TestUserErrorAuth(t *testing.T) {
 		DialOptions: []grpc.DialOption{grpc.WithBlock()},
 	}
 	cfg.Username, cfg.Password = "wrong-id", "123"
-	if _, err := integration2.NewClient(t, cfg); err != rpctypes.ErrAuthFailed {
+	if _, err := integration.NewClient(t, cfg); err != rpctypes.ErrAuthFailed {
 		t.Fatalf("expected %v, got %v", rpctypes.ErrAuthFailed, err)
 	}
 	cfg.Username, cfg.Password = "root", "wrong-pass"
-	if _, err := integration2.NewClient(t, cfg); err != rpctypes.ErrAuthFailed {
+	if _, err := integration.NewClient(t, cfg); err != rpctypes.ErrAuthFailed {
 		t.Fatalf("expected %v, got %v", rpctypes.ErrAuthFailed, err)
 	}
 
 	cfg.Username, cfg.Password = "root", "123"
-	authed, err := integration2.NewClient(t, cfg)
+	authed, err := integration.NewClient(t, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,12 +161,11 @@ func authSetupRoot(t *testing.T, auth clientv3.Auth) {
 	}
 }
 
-// TestGetTokenWithoutAuth is when Client can connect to etcd even if they
-// supply credentials and the server is in AuthDisable mode.
+// TestGetTokenWithoutAuth to ensure client can connect to etcd even if they supply credentials and the server is in AuthDisable mode.
 func TestGetTokenWithoutAuth(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 2})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 2})
 	defer clus.Terminate(t)
 
 	authapi := clus.RandClient()
@@ -188,7 +186,7 @@ func TestGetTokenWithoutAuth(t *testing.T) {
 		Password:    "123",
 	}
 
-	client, err = integration2.NewClient(t, cfg)
+	client, err = integration.NewClient(t, cfg)
 	if err == nil {
 		defer client.Close()
 	}

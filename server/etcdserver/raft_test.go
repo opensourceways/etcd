@@ -22,19 +22,17 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap/zaptest"
-
+	"github.com/stretchr/testify/assert"
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/pkg/v3/pbutil"
+	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
 	"go.etcd.io/etcd/server/v3/mock/mockstorage"
-	serverstorage "go.etcd.io/etcd/server/v3/storage"
-	"go.etcd.io/raft/v3"
-	"go.etcd.io/raft/v3/raftpb"
+	"go.uber.org/zap"
 )
 
 func TestGetIDs(t *testing.T) {
-	lg := zaptest.NewLogger(t)
 	addcc := &raftpb.ConfChange{Type: raftpb.ConfChangeAddNode, NodeID: 2}
 	addEntry := raftpb.Entry{Type: raftpb.EntryConfChange, Data: pbutil.MustMarshal(addcc)}
 	removecc := &raftpb.ConfChange{Type: raftpb.ConfChangeRemoveNode, NodeID: 2}
@@ -69,7 +67,7 @@ func TestGetIDs(t *testing.T) {
 		if tt.confState != nil {
 			snap.Metadata.ConfState = *tt.confState
 		}
-		idSet := serverstorage.GetEffectiveNodeIDsFromWALEntries(lg, &snap, tt.ents)
+		idSet := getIDs(testLogger, &snap, tt.ents)
 		if !reflect.DeepEqual(idSet, tt.widSet) {
 			t.Errorf("#%d: idset = %#v, want %#v", i, idSet, tt.widSet)
 		}
@@ -77,7 +75,6 @@ func TestGetIDs(t *testing.T) {
 }
 
 func TestCreateConfigChangeEnts(t *testing.T) {
-	lg := zaptest.NewLogger(t)
 	m := membership.Member{
 		ID:             types.ID(1),
 		RaftAttributes: membership.RaftAttributes{PeerURLs: []string{"http://localhost:2380"}},
@@ -150,7 +147,7 @@ func TestCreateConfigChangeEnts(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		gents := serverstorage.CreateConfigChangeEnts(lg, tt.ids, tt.self, tt.term, tt.index)
+		gents := createConfigChangeEnts(testLogger, tt.ids, tt.self, tt.term, tt.index)
 		if !reflect.DeepEqual(gents, tt.wents) {
 			t.Errorf("#%d: ents = %v, want %v", i, gents, tt.wents)
 		}
@@ -160,47 +157,41 @@ func TestCreateConfigChangeEnts(t *testing.T) {
 func TestStopRaftWhenWaitingForApplyDone(t *testing.T) {
 	n := newNopReadyNode()
 	r := newRaftNode(raftNodeConfig{
-		lg:          zaptest.NewLogger(t),
+		lg:          zap.NewExample(),
 		Node:        n,
 		storage:     mockstorage.NewStorageRecorder(""),
 		raftStorage: raft.NewMemoryStorage(),
 		transport:   newNopTransporter(),
 	})
-	srv := &EtcdServer{lgMu: new(sync.RWMutex), lg: zaptest.NewLogger(t), r: *r}
+	srv := &EtcdServer{lgMu: new(sync.RWMutex), lg: zap.NewExample(), r: *r}
 	srv.r.start(nil)
 	n.readyc <- raft.Ready{}
-
-	stop := func() {
-		srv.r.stopped <- struct{}{}
-		select {
-		case <-srv.r.done:
-		case <-time.After(time.Second):
-			t.Fatalf("failed to stop raft loop")
-		}
-	}
-
 	select {
 	case <-srv.r.applyc:
 	case <-time.After(time.Second):
-		stop()
-		t.Fatalf("failed to receive toApply struct")
+		t.Fatalf("failed to receive apply struct")
 	}
 
-	stop()
+	srv.r.stopped <- struct{}{}
+	select {
+	case <-srv.r.done:
+	case <-time.After(time.Second):
+		t.Fatalf("failed to stop raft loop")
+	}
 }
 
-// TestConfigChangeBlocksApply ensures toApply blocks if committed entries contain config-change.
+// TestConfigChangeBlocksApply ensures apply blocks if committed entries contain config-change.
 func TestConfigChangeBlocksApply(t *testing.T) {
 	n := newNopReadyNode()
 
 	r := newRaftNode(raftNodeConfig{
-		lg:          zaptest.NewLogger(t),
+		lg:          zap.NewExample(),
 		Node:        n,
 		storage:     mockstorage.NewStorageRecorder(""),
 		raftStorage: raft.NewMemoryStorage(),
 		transport:   newNopTransporter(),
 	})
-	srv := &EtcdServer{lgMu: new(sync.RWMutex), lg: zaptest.NewLogger(t), r: *r}
+	srv := &EtcdServer{lgMu: new(sync.RWMutex), lg: zap.NewExample(), r: *r}
 
 	srv.r.start(&raftReadyHandler{
 		getLead:          func() uint64 { return 0 },
@@ -224,17 +215,12 @@ func TestConfigChangeBlocksApply(t *testing.T) {
 
 	select {
 	case <-continueC:
-		t.Fatalf("unexpected execution: raft routine should block waiting for toApply")
+		t.Fatalf("unexpected execution: raft routine should block waiting for apply")
 	case <-time.After(time.Second):
 	}
 
-	// finish toApply, unblock raft routine
+	// finish apply, unblock raft routine
 	<-ap.notifyc
-
-	select {
-	case <-ap.raftAdvancedC:
-		t.Log("recevied raft advance notification")
-	}
 
 	select {
 	case <-continueC:
@@ -245,13 +231,13 @@ func TestConfigChangeBlocksApply(t *testing.T) {
 
 func TestProcessDuplicatedAppRespMessage(t *testing.T) {
 	n := newNopReadyNode()
-	cl := membership.NewCluster(zaptest.NewLogger(t))
+	cl := membership.NewCluster(zap.NewExample())
 
 	rs := raft.NewMemoryStorage()
 	p := mockstorage.NewStorageRecorder("")
 	tr, sendc := newSendMsgAppRespTransporter()
 	r := newRaftNode(raftNodeConfig{
-		lg:          zaptest.NewLogger(t),
+		lg:          zap.NewExample(),
 		isIDRemoved: func(id uint64) bool { return cl.IsIDRemoved(types.ID(id)) },
 		Node:        n,
 		transport:   tr,
@@ -261,7 +247,7 @@ func TestProcessDuplicatedAppRespMessage(t *testing.T) {
 
 	s := &EtcdServer{
 		lgMu:       new(sync.RWMutex),
-		lg:         zaptest.NewLogger(t),
+		lg:         zap.NewExample(),
 		r:          *r,
 		cluster:    cl,
 		SyncTicker: &time.Ticker{},
@@ -297,28 +283,78 @@ func TestExpvarWithNoRaftStatus(t *testing.T) {
 	})
 }
 
-func TestStopRaftNodeMoreThanOnce(t *testing.T) {
-	n := newNopReadyNode()
-	r := newRaftNode(raftNodeConfig{
-		lg:          zaptest.NewLogger(t),
-		Node:        n,
-		storage:     mockstorage.NewStorageRecorder(""),
-		raftStorage: raft.NewMemoryStorage(),
-		transport:   newNopTransporter(),
-	})
-	r.start(&raftReadyHandler{})
+func TestShouldWaitWALSync(t *testing.T) {
+	testcases := []struct {
+		name            string
+		unstableEntries []raftpb.Entry
+		commitedEntries []raftpb.Entry
+		expectedResult  bool
+	}{
+		{
+			name:            "both entries are nil",
+			unstableEntries: nil,
+			commitedEntries: nil,
+			expectedResult:  false,
+		},
+		{
+			name:            "both entries are empty slices",
+			unstableEntries: []raftpb.Entry{},
+			commitedEntries: []raftpb.Entry{},
+			expectedResult:  false,
+		},
+		{
+			name:            "one nil and the other empty",
+			unstableEntries: nil,
+			commitedEntries: []raftpb.Entry{},
+			expectedResult:  false,
+		},
+		{
+			name:            "one nil and the other has data",
+			unstableEntries: nil,
+			commitedEntries: []raftpb.Entry{{Term: 4, Index: 10, Type: raftpb.EntryNormal, Data: []byte{0x11, 0x22, 0x33}}},
+			expectedResult:  false,
+		},
+		{
+			name:            "one empty and the other has data",
+			unstableEntries: []raftpb.Entry{},
+			commitedEntries: []raftpb.Entry{{Term: 4, Index: 10, Type: raftpb.EntryNormal, Data: []byte{0x11, 0x22, 0x33}}},
+			expectedResult:  false,
+		},
+		{
+			name:            "has different term and index",
+			unstableEntries: []raftpb.Entry{{Term: 5, Index: 11, Type: raftpb.EntryNormal, Data: []byte{0x11, 0x22, 0x33}}},
+			commitedEntries: []raftpb.Entry{{Term: 4, Index: 10, Type: raftpb.EntryNormal, Data: []byte{0x11, 0x22, 0x33}}},
+			expectedResult:  false,
+		},
+		{
+			name:            "has identical data",
+			unstableEntries: []raftpb.Entry{{Term: 4, Index: 10, Type: raftpb.EntryNormal, Data: []byte{0x11, 0x22, 0x33}}},
+			commitedEntries: []raftpb.Entry{{Term: 4, Index: 10, Type: raftpb.EntryNormal, Data: []byte{0x11, 0x22, 0x33}}},
+			expectedResult:  true,
+		},
+		{
+			name: "has overlapped entry",
+			unstableEntries: []raftpb.Entry{
+				{Term: 4, Index: 10, Type: raftpb.EntryNormal, Data: []byte{0x11, 0x22, 0x33}},
+				{Term: 4, Index: 11, Type: raftpb.EntryNormal, Data: []byte{0x44, 0x55, 0x66}},
+				{Term: 4, Index: 12, Type: raftpb.EntryNormal, Data: []byte{0x77, 0x88, 0x99}},
+			},
+			commitedEntries: []raftpb.Entry{
+				{Term: 4, Index: 8, Type: raftpb.EntryNormal, Data: []byte{0x07, 0x08, 0x09}},
+				{Term: 4, Index: 9, Type: raftpb.EntryNormal, Data: []byte{0x10, 0x11, 0x12}},
+				{Term: 4, Index: 10, Type: raftpb.EntryNormal, Data: []byte{0x11, 0x22, 0x33}},
+			},
+			expectedResult: true,
+		},
+	}
 
-	for i := 0; i < 2; i++ {
-		stopped := make(chan struct{})
-		go func() {
-			r.stop()
-			close(stopped)
-		}()
-
-		select {
-		case <-stopped:
-		case <-time.After(time.Second):
-			t.Errorf("*raftNode.stop() is blocked !")
-		}
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			shouldWALSync := shouldWaitWALSync(raft.Ready{
+				Entries:          tc.unstableEntries,
+				CommittedEntries: tc.commitedEntries,
+			})
+			assert.Equal(t, tc.expectedResult, shouldWALSync)
+		})
 	}
 }

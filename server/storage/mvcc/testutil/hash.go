@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
 	"go.etcd.io/bbolt"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 )
@@ -121,8 +120,7 @@ func CorruptBBolt(fpath string) error {
 		if b == nil {
 			return errors.New("got nil bucket for 'key'")
 		}
-		var vals [][]byte
-		var keys [][]byte
+		keys, vals := [][]byte{}, [][]byte{}
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			keys = append(keys, k)

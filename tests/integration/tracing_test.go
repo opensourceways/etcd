@@ -31,11 +31,11 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
-	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 // TestTracing ensures that distributed tracing is setup when the feature flag is enabled.
 func TestTracing(t *testing.T) {
+	BeforeTest(t)
 	testutil.SkipTestIfShortMode(t,
 		"Wal creation tests are depending on embedded etcd server so are integration-level tests.")
 	// set up trace collector
@@ -55,7 +55,7 @@ func TestTracing(t *testing.T) {
 	go srv.Serve(listener)
 	defer srv.Stop()
 
-	cfg := integration.NewEmbedConfig(t, "default")
+	cfg := NewEmbedConfig(t, "default")
 	cfg.ExperimentalEnableDistributedTracing = true
 	cfg.ExperimentalDistributedTracingAddress = listener.Addr().String()
 	cfg.ExperimentalDistributedTracingServiceName = "integration-test-tracing"
@@ -94,7 +94,7 @@ func TestTracing(t *testing.T) {
 		grpc.WithUnaryInterceptor(otelgrpc.UnaryClientInterceptor(tracingOpts...)),
 		grpc.WithStreamInterceptor(otelgrpc.StreamClientInterceptor(tracingOpts...))}
 	ccfg := clientv3.Config{DialOptions: dialOptions, Endpoints: []string{cfg.AdvertiseClientUrls[0].String()}}
-	cli, err := integration.NewClient(t, ccfg)
+	cli, err := NewClient(t, ccfg)
 	if err != nil {
 		etcdSrv.Close()
 		t.Fatal(err)

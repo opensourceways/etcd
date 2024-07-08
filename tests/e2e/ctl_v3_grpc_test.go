@@ -13,11 +13,11 @@
 // limitations under the License.
 
 //go:build !cluster_proxy
+// +build !cluster_proxy
 
 package e2e
 
 import (
-	"context"
 	"fmt"
 	"net/url"
 	"strings"
@@ -26,31 +26,34 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"go.etcd.io/etcd/pkg/v3/expect"
-	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
-	"go.etcd.io/etcd/tests/v3/framework/testutils"
+	"go.etcd.io/etcd/tests/v3/testutils"
 )
 
 func TestAuthority(t *testing.T) {
 	tcs := []struct {
-		name                   string
-		useUnix                bool
-		useTLS                 bool
-		useInsecureTLS         bool
-		clientURLPattern       string
+		name           string
+		useUnix        bool
+		useTLS         bool
+		useInsecureTLS bool
+		// Pattern used to generate endpoints for client. Fields filled
+		// %d - will be filled with member grpc port
+		clientURLPattern string
+
+		// Pattern used to validate authority received by server. Fields filled:
+		// ${MEMBER_PORT} - will be filled with member grpc port
 		expectAuthorityPattern string
 	}{
 		{
 			name:                   "unix:path",
 			useUnix:                true,
-			clientURLPattern:       "unix:localhost:${MEMBER_PORT}",
+			clientURLPattern:       "unix:localhost:%d",
 			expectAuthorityPattern: "localhost:${MEMBER_PORT}",
 		},
 		{
 			name:                   "unix://absolute_path",
 			useUnix:                true,
-			clientURLPattern:       "unix://localhost:${MEMBER_PORT}",
+			clientURLPattern:       "unix://localhost:%d",
 			expectAuthorityPattern: "localhost:${MEMBER_PORT}",
 		},
 		// "unixs" is not standard schema supported by etcd
@@ -58,50 +61,50 @@ func TestAuthority(t *testing.T) {
 			name:                   "unixs:absolute_path",
 			useUnix:                true,
 			useTLS:                 true,
-			clientURLPattern:       "unixs:localhost:${MEMBER_PORT}",
+			clientURLPattern:       "unixs:localhost:%d",
 			expectAuthorityPattern: "localhost:${MEMBER_PORT}",
 		},
 		{
 			name:                   "unixs://absolute_path",
 			useUnix:                true,
 			useTLS:                 true,
-			clientURLPattern:       "unixs://localhost:${MEMBER_PORT}",
+			clientURLPattern:       "unixs://localhost:%d",
 			expectAuthorityPattern: "localhost:${MEMBER_PORT}",
 		},
 		{
 			name:                   "http://domain[:port]",
-			clientURLPattern:       "http://localhost:${MEMBER_PORT}",
+			clientURLPattern:       "http://localhost:%d",
 			expectAuthorityPattern: "localhost:${MEMBER_PORT}",
 		},
 		{
 			name:                   "http://address[:port]",
-			clientURLPattern:       "http://127.0.0.1:${MEMBER_PORT}",
+			clientURLPattern:       "http://127.0.0.1:%d",
 			expectAuthorityPattern: "127.0.0.1:${MEMBER_PORT}",
 		},
 		{
 			name:                   "https://domain[:port] insecure",
 			useTLS:                 true,
 			useInsecureTLS:         true,
-			clientURLPattern:       "https://localhost:${MEMBER_PORT}",
+			clientURLPattern:       "https://localhost:%d",
 			expectAuthorityPattern: "localhost:${MEMBER_PORT}",
 		},
 		{
 			name:                   "https://address[:port] insecure",
 			useTLS:                 true,
 			useInsecureTLS:         true,
-			clientURLPattern:       "https://127.0.0.1:${MEMBER_PORT}",
+			clientURLPattern:       "https://127.0.0.1:%d",
 			expectAuthorityPattern: "127.0.0.1:${MEMBER_PORT}",
 		},
 		{
 			name:                   "https://domain[:port]",
 			useTLS:                 true,
-			clientURLPattern:       "https://localhost:${MEMBER_PORT}",
+			clientURLPattern:       "https://localhost:%d",
 			expectAuthorityPattern: "localhost:${MEMBER_PORT}",
 		},
 		{
 			name:                   "https://address[:port]",
 			useTLS:                 true,
-			clientURLPattern:       "https://127.0.0.1:${MEMBER_PORT}",
+			clientURLPattern:       "https://127.0.0.1:%d",
 			expectAuthorityPattern: "127.0.0.1:${MEMBER_PORT}",
 		},
 	}
@@ -109,32 +112,29 @@ func TestAuthority(t *testing.T) {
 		for _, clusterSize := range []int{1, 3} {
 			t.Run(fmt.Sprintf("Size: %d, Scenario: %q", clusterSize, tc.name), func(t *testing.T) {
 				e2e.BeforeTest(t)
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
 
 				cfg := e2e.NewConfigNoTLS()
 				cfg.ClusterSize = clusterSize
 				if tc.useTLS {
-					cfg.Client.ConnectionType = e2e.ClientTLS
+					cfg.ClientTLS = e2e.ClientTLS
 				}
-				cfg.Client.AutoTLS = tc.useInsecureTLS
+				cfg.IsClientAutoTLS = tc.useInsecureTLS
 				// Enable debug mode to get logs with http2 headers (including authority)
 				cfg.EnvVars = map[string]string{"GODEBUG": "http2debug=2"}
 				if tc.useUnix {
 					cfg.BaseClientScheme = "unix"
 				}
 
-				epc, err := e2e.NewEtcdProcessCluster(context.TODO(), t, e2e.WithConfig(cfg))
+				epc, err := e2e.NewEtcdProcessCluster(t, cfg)
 				if err != nil {
 					t.Fatalf("could not start etcd process cluster (%v)", err)
 				}
 				defer epc.Close()
-
 				endpoints := templateEndpoints(t, tc.clientURLPattern, epc)
-				client, err := e2e.NewEtcdctl(cfg.Client, endpoints)
-				assert.NoError(t, err)
+
+				client := clusterEtcdctlV3(cfg, endpoints)
 				for i := 0; i < 100; i++ {
-					err = client.Put(ctx, "foo", "bar", config.PutOptions{})
+					err = client.Put("foo", "bar")
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -150,10 +150,15 @@ func TestAuthority(t *testing.T) {
 
 func templateEndpoints(t *testing.T, pattern string, clus *e2e.EtcdProcessCluster) []string {
 	t.Helper()
-	var endpoints []string
+	endpoints := []string{}
 	for i := 0; i < clus.Cfg.ClusterSize; i++ {
 		ent := pattern
-		ent = strings.ReplaceAll(ent, "${MEMBER_PORT}", fmt.Sprintf("%d", e2e.EtcdProcessBasePort+i*5))
+		if strings.Contains(ent, "%d") {
+			ent = fmt.Sprintf(ent, e2e.EtcdProcessBasePort+i*5)
+		}
+		if strings.Contains(ent, "%") {
+			t.Fatalf("Failed to template pattern, %% symbol left %q", ent)
+		}
 		endpoints = append(endpoints, ent)
 	}
 	return endpoints
@@ -161,10 +166,9 @@ func templateEndpoints(t *testing.T, pattern string, clus *e2e.EtcdProcessCluste
 
 func assertAuthority(t *testing.T, expectAuthorityPattern string, clus *e2e.EtcdProcessCluster) {
 	for i := range clus.Procs {
-		line, _ := clus.Procs[i].Logs().ExpectWithContext(context.TODO(), expect.ExpectedResponse{Value: `http2: decoded hpack field header field ":authority"`})
+		line, _ := clus.Procs[i].Logs().Expect(`http2: decoded hpack field header field ":authority"`)
 		line = strings.TrimSuffix(line, "\n")
 		line = strings.TrimSuffix(line, "\r")
-
 		u, err := url.Parse(clus.Procs[i].EndpointsGRPC()[0])
 		if err != nil {
 			t.Fatal(err)
@@ -173,4 +177,49 @@ func assertAuthority(t *testing.T, expectAuthorityPattern string, clus *e2e.Etcd
 		expectLine := fmt.Sprintf(`http2: decoded hpack field header field ":authority" = %q`, expectAuthority)
 		assert.True(t, strings.HasSuffix(line, expectLine), fmt.Sprintf("Got %q expected suffix %q", line, expectLine))
 	}
+}
+
+type etcdctlV3 struct {
+	cfg       *e2e.EtcdProcessClusterConfig
+	endpoints []string
+}
+
+func clusterEtcdctlV3(cfg *e2e.EtcdProcessClusterConfig, endpoints []string) *etcdctlV3 {
+	return &etcdctlV3{
+		cfg:       cfg,
+		endpoints: endpoints,
+	}
+}
+
+func (ctl *etcdctlV3) Put(key, value string) error {
+	return ctl.runCmd("put", key, value)
+}
+
+func (ctl *etcdctlV3) runCmd(args ...string) error {
+	cmdArgs := []string{e2e.CtlBinPath + "3"}
+	for k, v := range ctl.flags() {
+		cmdArgs = append(cmdArgs, fmt.Sprintf("--%s=%s", k, v))
+	}
+	cmdArgs = append(cmdArgs, args...)
+	return e2e.SpawnWithExpect(cmdArgs, "OK")
+}
+
+func (ctl *etcdctlV3) flags() map[string]string {
+	fmap := make(map[string]string)
+	if ctl.cfg.ClientTLS == e2e.ClientTLS {
+		if ctl.cfg.IsClientAutoTLS {
+			fmap["insecure-transport"] = "false"
+			fmap["insecure-skip-tls-verify"] = "true"
+		} else if ctl.cfg.IsClientCRL {
+			fmap["cacert"] = e2e.CaPath
+			fmap["cert"] = e2e.RevokedCertPath
+			fmap["key"] = e2e.RevokedPrivateKeyPath
+		} else {
+			fmap["cacert"] = e2e.CaPath
+			fmap["cert"] = e2e.CertPath
+			fmap["key"] = e2e.PrivateKeyPath
+		}
+	}
+	fmap["endpoints"] = strings.Join(ctl.endpoints, ",")
+	return fmap
 }

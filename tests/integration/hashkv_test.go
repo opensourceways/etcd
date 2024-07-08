@@ -24,21 +24,26 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/storage/mvcc/testutil"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
-// TestCompactionHash tests the compaction hash
+const (
+	// Use high prime
+	compactionCycle = 71
+)
+
+// TestCompactionHash
 // TODO: Change this to fuzz test
 func TestCompactionHash(t *testing.T) {
-	integration2.BeforeTest(t)
+	BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
-	cc, err := clus.ClusterClient(t)
+	cc, err := clus.ClusterClient()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
@@ -47,7 +52,7 @@ func TestCompactionHash(t *testing.T) {
 		},
 	}
 
-	testutil.TestCompactionHash(context.Background(), t, hashTestCase{cc, clus.Members[0].GRPCURL, client, clus.Members[0].Server}, 1000)
+	testutil.TestCompactionHash(context.Background(), t, hashTestCase{cc, clus.Members[0].GRPCURL(), client, clus.Members[0].s}, 1000)
 }
 
 type hashTestCase struct {

@@ -20,15 +20,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/spf13/cobra"
-	"go.uber.org/zap"
-
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	v3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 	"go.etcd.io/etcd/pkg/v3/flags"
+
+	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 )
 
 var epClusterEndpoints bool
@@ -76,7 +76,7 @@ func newEpHashKVCommand() *cobra.Command {
 		Short: "Prints the KV history hash for each endpoint in --endpoints",
 		Run:   epHashKVCommandFunc,
 	}
-	hc.PersistentFlags().Int64Var(&epHashKVRev, "rev", 0, "maximum revision to hash (default: latest revision)")
+	hc.PersistentFlags().Int64Var(&epHashKVRev, "rev", 0, "maximum revision to hash (default: all revisions)")
 	return hc
 }
 
@@ -101,16 +101,9 @@ func epHealthCommandFunc(cmd *cobra.Command, args []string) {
 	ka := keepAliveTimeFromCmd(cmd)
 	kat := keepAliveTimeoutFromCmd(cmd)
 	auth := authCfgFromCmd(cmd)
-	var cfgs []*clientv3.Config
+	cfgs := []*v3.Config{}
 	for _, ep := range endpointsFromCluster(cmd) {
-		cfg, err := clientv3.NewClientConfig(&clientv3.ConfigSpec{
-			Endpoints:        []string{ep},
-			DialTimeout:      dt,
-			KeepAliveTime:    ka,
-			KeepAliveTimeout: kat,
-			Secure:           sec,
-			Auth:             auth,
-		}, lg)
+		cfg, err := newClientCfg([]string{ep}, dt, ka, kat, sec, auth)
 		if err != nil {
 			cobrautl.ExitWithError(cobrautl.ExitBadArgs, err)
 		}
@@ -121,11 +114,11 @@ func epHealthCommandFunc(cmd *cobra.Command, args []string) {
 	hch := make(chan epHealth, len(cfgs))
 	for _, cfg := range cfgs {
 		wg.Add(1)
-		go func(cfg *clientv3.Config) {
+		go func(cfg *v3.Config) {
 			defer wg.Done()
 			ep := cfg.Endpoints[0]
 			cfg.Logger = lg.Named("client")
-			cli, err := clientv3.New(*cfg)
+			cli, err := v3.New(*cfg)
 			if err != nil {
 				hch <- epHealth{Ep: ep, Health: false, Error: err.Error()}
 				return
@@ -172,7 +165,7 @@ func epHealthCommandFunc(cmd *cobra.Command, args []string) {
 	close(hch)
 
 	errs := false
-	var healthList []epHealth
+	healthList := []epHealth{}
 	for h := range hch {
 		healthList = append(healthList, h)
 		if h.Error != "" {
@@ -186,22 +179,19 @@ func epHealthCommandFunc(cmd *cobra.Command, args []string) {
 }
 
 type epStatus struct {
-	Ep   string                   `json:"Endpoint"`
-	Resp *clientv3.StatusResponse `json:"Status"`
+	Ep   string             `json:"Endpoint"`
+	Resp *v3.StatusResponse `json:"Status"`
 }
 
 func epStatusCommandFunc(cmd *cobra.Command, args []string) {
-	cfg := clientConfigFromCmd(cmd)
+	c := mustClientFromCmd(cmd)
 
-	var statusList []epStatus
+	statusList := []epStatus{}
 	var err error
 	for _, ep := range endpointsFromCluster(cmd) {
-		cfg.Endpoints = []string{ep}
-		c := mustClient(cfg)
 		ctx, cancel := commandCtx(cmd)
 		resp, serr := c.Status(ctx, ep)
 		cancel()
-		c.Close()
 		if serr != nil {
 			err = serr
 			fmt.Fprintf(os.Stderr, "Failed to get the status of endpoint %s (%v)\n", ep, serr)
@@ -218,22 +208,19 @@ func epStatusCommandFunc(cmd *cobra.Command, args []string) {
 }
 
 type epHashKV struct {
-	Ep   string                   `json:"Endpoint"`
-	Resp *clientv3.HashKVResponse `json:"HashKV"`
+	Ep   string             `json:"Endpoint"`
+	Resp *v3.HashKVResponse `json:"HashKV"`
 }
 
 func epHashKVCommandFunc(cmd *cobra.Command, args []string) {
-	cfg := clientConfigFromCmd(cmd)
+	c := mustClientFromCmd(cmd)
 
-	var hashList []epHashKV
+	hashList := []epHashKV{}
 	var err error
 	for _, ep := range endpointsFromCluster(cmd) {
-		cfg.Endpoints = []string{ep}
-		c := mustClient(cfg)
 		ctx, cancel := commandCtx(cmd)
 		resp, serr := c.HashKV(ctx, ep, epHashKVRev)
 		cancel()
-		c.Close()
 		if serr != nil {
 			err = serr
 			fmt.Fprintf(os.Stderr, "Failed to get the hash of endpoint %s (%v)\n", ep, serr)
@@ -267,18 +254,12 @@ func endpointsFromCluster(cmd *cobra.Command) []string {
 		cobrautl.ExitWithError(cobrautl.ExitError, err)
 	}
 	// exclude auth for not asking needless password (MemberList() doesn't need authentication)
-	lg, _ := logutil.CreateDefaultZapLogger(zap.InfoLevel)
-	cfg, err := clientv3.NewClientConfig(&clientv3.ConfigSpec{
-		Endpoints:        eps,
-		DialTimeout:      dt,
-		KeepAliveTime:    ka,
-		KeepAliveTimeout: kat,
-		Secure:           sec,
-	}, lg)
+
+	cfg, err := newClientCfg(eps, dt, ka, kat, sec, nil)
 	if err != nil {
 		cobrautl.ExitWithError(cobrautl.ExitError, err)
 	}
-	c, err := clientv3.New(*cfg)
+	c, err := v3.New(*cfg)
 	if err != nil {
 		cobrautl.ExitWithError(cobrautl.ExitError, err)
 	}
@@ -294,7 +275,7 @@ func endpointsFromCluster(cmd *cobra.Command) []string {
 		cobrautl.ExitWithError(cobrautl.ExitError, err)
 	}
 
-	var ret []string
+	ret := []string{}
 	for _, m := range membs.Members {
 		ret = append(ret, m.ClientURLs...)
 	}

@@ -25,17 +25,17 @@ import (
 	"testing"
 	"time"
 
+	"go.etcd.io/etcd/client/pkg/v3/transport"
+	"go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/tests/v3/integration"
+
 	grpcprom "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
-
-	"go.etcd.io/etcd/client/pkg/v3/transport"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 func TestV3ClientMetrics(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
 	var (
 		addr = "localhost:27989"
@@ -59,27 +59,29 @@ func TestV3ClientMetrics(t *testing.T) {
 	// listen for all Prometheus metrics
 
 	go func() {
+		var err error
+
 		defer close(donec)
 
-		serr := srv.Serve(ln)
-		if serr != nil && !transport.IsClosedConnError(serr) {
-			t.Errorf("Err serving http requests: %v", serr)
+		err = srv.Serve(ln)
+		if err != nil && !transport.IsClosedConnError(err) {
+			t.Errorf("Err serving http requests: %v", err)
 		}
 	}()
 
 	url := "unix://" + addr + "/metrics"
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1, SkipCreatingClient: true})
 	defer clus.Terminate(t)
 
 	cfg := clientv3.Config{
-		Endpoints: []string{clus.Members[0].GRPCURL},
+		Endpoints: []string{clus.Members[0].GRPCURL()},
 		DialOptions: []grpc.DialOption{
 			grpc.WithUnaryInterceptor(grpcprom.UnaryClientInterceptor),
 			grpc.WithStreamInterceptor(grpcprom.StreamClientInterceptor),
 		},
 	}
-	cli, cerr := integration2.NewClient(t, cfg)
+	cli, cerr := integration.NewClient(t, cfg)
 	if cerr != nil {
 		t.Fatal(cerr)
 	}
@@ -161,7 +163,7 @@ func getHTTPBodyAsLines(t *testing.T, url string) []string {
 	}
 
 	reader := bufio.NewReader(resp.Body)
-	var lines []string
+	lines := []string{}
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {

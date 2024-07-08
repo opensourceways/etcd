@@ -19,8 +19,7 @@ import (
 	"strconv"
 
 	"github.com/spf13/cobra"
-
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 )
 
@@ -45,9 +44,9 @@ func transferLeadershipCommandFunc(cmd *cobra.Command, args []string) {
 	}
 
 	cfg := clientConfigFromCmd(cmd)
-	cli := mustClient(cfg)
-	eps := cli.Endpoints()
-	cli.Close()
+	c := cfg.mustClient()
+	eps := c.Endpoints()
+	c.Close()
 
 	ctx, cancel := commandCtx(cmd)
 
@@ -55,8 +54,8 @@ func transferLeadershipCommandFunc(cmd *cobra.Command, args []string) {
 	var leaderCli *clientv3.Client
 	var leaderID uint64
 	for _, ep := range eps {
-		cfg.Endpoints = []string{ep}
-		cli := mustClient(cfg)
+		cfg.endpoints = []string{ep}
+		cli := cfg.mustClient()
 		resp, serr := cli.Status(ctx, ep)
 		if serr != nil {
 			cobrautl.ExitWithError(cobrautl.ExitError, serr)

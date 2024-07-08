@@ -1,4 +1,4 @@
-// Copyright 2023 The etcd Authors
+// Copyright 2024 The etcd Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -48,11 +48,11 @@ func testLeaseRevokeIssue(t *testing.T, connectToOneFollower bool) {
 	ctx := context.Background()
 
 	t.Log("Starting a new etcd cluster")
-	epc, err := e2e.NewEtcdProcessCluster(ctx, t,
-		e2e.WithClusterSize(3),
-		e2e.WithGoFailEnabled(true),
-		e2e.WithGoFailClientTimeout(40*time.Second),
-	)
+	epc, err := e2e.NewEtcdProcessCluster(t, &e2e.EtcdProcessClusterConfig{
+		ClusterSize:         3,
+		GoFailEnabled:       true,
+		GoFailClientTimeout: 40 * time.Second,
+	})
 	require.NoError(t, err)
 	defer func() {
 		if errC := epc.Close(); errC != nil {
@@ -82,7 +82,7 @@ func testLeaseRevokeIssue(t *testing.T, connectToOneFollower bool) {
 
 	resp, err := client.Status(ctx, epsForNormalOperations[0])
 	require.NoError(t, err)
-	oldLeaderID := resp.Leader
+	oldLeaderId := resp.Leader
 
 	t.Log("Creating a new lease")
 	leaseRsp, err := client.Grant(ctx, 20)
@@ -118,11 +118,11 @@ func testLeaseRevokeIssue(t *testing.T, connectToOneFollower bool) {
 	require.NoError(t, err)
 
 	cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	t.Logf("Waiting for a new leader to be elected, old leader index: %d, old leader ID: %d", leaderIdx, oldLeaderID)
+	t.Logf("Waiting for a new leader to be elected, old leader index: %d, old leader ID: %d", leaderIdx, oldLeaderId)
 	testutils.ExecuteUntil(cctx, t, func() {
 		for {
 			resp, err = client.Status(ctx, epsForNormalOperations[0])
-			if err == nil && resp.Leader != oldLeaderID {
+			if err == nil && resp.Leader != oldLeaderId {
 				t.Logf("A new leader has already been elected, new leader index: %d", resp.Leader)
 				return
 			}

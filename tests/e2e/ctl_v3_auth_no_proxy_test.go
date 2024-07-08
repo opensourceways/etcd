@@ -15,17 +15,16 @@
 // These tests depend on certificate-based authentication that is NOT supported
 // by gRPC proxy.
 //go:build !cluster_proxy
+// +build !cluster_proxy
 
 package e2e
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
-	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 )
 
@@ -41,8 +40,6 @@ func TestCtlV3AuthCertCNAndUsernameNoPassword(t *testing.T) {
 
 func TestCtlV3AuthCertCNWithWithConcurrentOperation(t *testing.T) {
 	e2e.BeforeTest(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// apply the certificate which has `root` CommonName,
 	// and reset the setting when the test case finishes.
@@ -52,29 +49,30 @@ func TestCtlV3AuthCertCNWithWithConcurrentOperation(t *testing.T) {
 	resetCert := applyTLSWithRootCommonName()
 	defer resetCert()
 
-	t.Log("Create etcd cluster")
-	epc, err := e2e.NewEtcdProcessCluster(ctx, t,
-		e2e.WithClusterSize(1),
-		e2e.WithClientConnType(e2e.ClientTLS),
-		e2e.WithClientCertAuthority(true),
-	)
-	if err != nil {
-		t.Fatalf("could not start etcd process cluster (%v)", err)
+	t.Log("Create an etcd cluster")
+	cx := getDefaultCtlCtx(t)
+	cx.cfg = e2e.EtcdProcessClusterConfig{
+		ClusterSize:           1,
+		ClientTLS:             e2e.ClientTLS,
+		ClientCertAuthEnabled: true,
+		InitialToken:          "new",
 	}
+
+	epc, err := e2e.NewEtcdProcessCluster(t, &cx.cfg)
+	if err != nil {
+		t.Fatalf("Failed to start etcd cluster: %v", err)
+	}
+	cx.epc = epc
+	cx.dataDir = epc.Procs[0].Config().DataDirPath
+
 	defer func() {
 		if err := epc.Close(); err != nil {
 			t.Fatalf("could not close test cluster (%v)", err)
 		}
 	}()
 
-	epcClient := epc.Etcdctl()
-	t.Log("Create users")
-	createUsers(ctx, t, epcClient)
-
 	t.Log("Enable auth")
-	if err := epcClient.AuthEnable(ctx); err != nil {
-		t.Fatalf("could not enable Auth: (%v)", err)
-	}
+	authEnableTest(cx)
 
 	// Create two goroutines, one goroutine keeps creating & deleting users,
 	// and the other goroutine keeps writing & deleting K/V entries.
@@ -90,12 +88,14 @@ func TestCtlV3AuthCertCNWithWithConcurrentOperation(t *testing.T) {
 		for i := 0; i < 100; i++ {
 			user := fmt.Sprintf("testuser-%d", i)
 			pass := fmt.Sprintf("testpass-%d", i)
-			if _, err := epcClient.UserAdd(ctx, user, pass, config.UserAddOptions{}); err != nil {
+
+			if err := ctlV3User(cx, []string{"add", user, "--interactive=false"}, fmt.Sprintf("User %s created", user), []string{pass}); err != nil {
 				errs <- fmt.Errorf("failed to create user %q: %w", user, err)
 				break
 			}
 
-			if _, err := epcClient.UserDelete(ctx, user); err != nil {
+			err := ctlV3User(cx, []string{"delete", user}, fmt.Sprintf("User %s deleted", user), []string{})
+			if err != nil {
 				errs <- fmt.Errorf("failed to delete user %q: %w", user, err)
 				break
 			}
@@ -111,12 +111,12 @@ func TestCtlV3AuthCertCNWithWithConcurrentOperation(t *testing.T) {
 			key := fmt.Sprintf("key-%d", i)
 			value := fmt.Sprintf("value-%d", i)
 
-			if err := epcClient.Put(ctx, key, value, config.PutOptions{}); err != nil {
+			if err := ctlV3Put(cx, key, value, ""); err != nil {
 				errs <- fmt.Errorf("failed to put key %q: %w", key, err)
 				break
 			}
 
-			if _, err := epcClient.Delete(ctx, key, config.DeleteOptions{}); err != nil {
+			if err := ctlV3Del(cx, []string{key}, 1); err != nil {
 				errs <- fmt.Errorf("failed to delete key %q: %w", key, err)
 				break
 			}
@@ -136,7 +136,7 @@ func TestCtlV3AuthCertCNWithWithConcurrentOperation(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	case <-donec:
 		t.Log("All done!")
-	case <-time.After(40 * time.Second):
-		t.Fatal("Test case timeout after 40 seconds")
+	case <-time.After(60 * time.Second):
+		t.Fatal("Test case timeout after 60 seconds")
 	}
 }

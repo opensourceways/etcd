@@ -35,21 +35,23 @@ func TestReproduce17780(t *testing.T) {
 	compactionBatchLimit := 10
 
 	ctx := context.TODO()
-	clus, cerr := e2e.NewEtcdProcessCluster(ctx, t,
-		e2e.WithClusterSize(3),
-		e2e.WithGoFailEnabled(true),
-		e2e.WithSnapshotCount(1000),
-		e2e.WithCompactionBatchLimit(compactionBatchLimit),
-		e2e.WithWatchProcessNotifyInterval(100*time.Millisecond),
+	clus, cerr := e2e.NewEtcdProcessCluster(t,
+		&e2e.EtcdProcessClusterConfig{
+			ClusterSize:                3,
+			GoFailEnabled:              true,
+			SnapshotCount:              1000,
+			CompactionBatchLimit:       compactionBatchLimit,
+			WatchProcessNotifyInterval: 100 * time.Millisecond,
+		},
 	)
 	require.NoError(t, cerr)
 
-	t.Cleanup(func() { clus.Stop() })
+	t.Cleanup(func() { require.NoError(t, clus.Stop()) })
 
 	leaderIdx := clus.WaitLeader(t)
 	targetIdx := (leaderIdx + 1) % clus.Cfg.ClusterSize
 
-	cli := newClient(t, clus.Procs[targetIdx].EndpointsGRPC(), e2e.ClientConfig{})
+	cli := newClient(t, clus.Procs[targetIdx].EndpointsGRPC(), e2e.ClientNonTLS, false)
 
 	// Revision: 2 -> 8 for new keys
 	n := compactionBatchLimit - 2
@@ -77,7 +79,12 @@ func TestReproduce17780(t *testing.T) {
 	_, err := cli.Compact(ctx, 11, clientv3.WithCompactPhysical())
 	require.Error(t, err)
 
-	require.NoError(t, clus.Procs[targetIdx].Restart(ctx))
+	require.Error(t, clus.Procs[targetIdx].Stop())
+	// NOTE: The proc panics and exit code is 2. It's impossible to restart
+	// that etcd proc because last exit code is 2 and Restart() refuses to
+	// start new one. Using IsRunning() function is to cleanup status.
+	require.False(t, clus.Procs[targetIdx].IsRunning())
+	require.NoError(t, clus.Procs[targetIdx].Restart())
 
 	// NOTE: We should not decrease the revision if there is no record
 	// about finished compact operation.
@@ -98,7 +105,7 @@ func TestReproduce17780(t *testing.T) {
 
 	expectedRevision := next
 	for procIdx, proc := range clus.Procs {
-		cli = newClient(t, proc.EndpointsGRPC(), e2e.ClientConfig{})
+		cli = newClient(t, proc.EndpointsGRPC(), e2e.ClientNonTLS, false)
 		resp, err := cli.Get(ctx, fmt.Sprintf("%d", next))
 		require.NoError(t, err)
 

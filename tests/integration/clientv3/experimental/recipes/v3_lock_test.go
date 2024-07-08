@@ -16,64 +16,61 @@ package recipes_test
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
-	"sync"
 	"testing"
 	"time"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
 	recipe "go.etcd.io/etcd/client/v3/experimental/recipes"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
+	"go.etcd.io/etcd/tests/v3/integration"
 )
 
 func TestMutexLockSingleNode(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	var clients []*clientv3.Client
-	testMutexLock(t, 5, integration2.MakeSingleNodeClients(t, clus, &clients))
-	integration2.CloseClients(t, clients)
+	testMutexLock(t, 5, integration.MakeSingleNodeClients(t, clus, &clients))
+	integration.CloseClients(t, clients)
 }
 
 func TestMutexLockMultiNode(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	var clients []*clientv3.Client
-	testMutexLock(t, 5, integration2.MakeMultiNodeClients(t, clus, &clients))
-	integration2.CloseClients(t, clients)
+	testMutexLock(t, 5, integration.MakeMultiNodeClients(t, clus, &clients))
+	integration.CloseClients(t, clients)
 }
 
 func testMutexLock(t *testing.T, waiters int, chooseClient func() *clientv3.Client) {
 	// stream lock acquisitions
-	lockedC := make(chan *concurrency.Mutex, waiters)
-	errC := make(chan error, waiters)
-
-	var wg sync.WaitGroup
-	wg.Add(waiters)
+	lockedC := make(chan *concurrency.Mutex)
+	stopC := make(chan struct{})
+	defer close(stopC)
 
 	for i := 0; i < waiters; i++ {
-		go func(i int) {
-			defer wg.Done()
+		go func() {
 			session, err := concurrency.NewSession(chooseClient())
 			if err != nil {
-				errC <- fmt.Errorf("#%d: failed to create new session: %w", i, err)
-				return
+				t.Error(err)
 			}
 			m := concurrency.NewMutex(session, "test-mutex")
 			if err := m.Lock(context.TODO()); err != nil {
-				errC <- fmt.Errorf("#%d: failed to wait on lock: %w", i, err)
-				return
+				t.Errorf("could not wait on lock (%v)", err)
 			}
-			lockedC <- m
-		}(i)
+			select {
+			case lockedC <- m:
+			case <-stopC:
+			}
+
+		}()
 	}
 	// unlock locked mutexes
 	timerC := time.After(time.Duration(waiters) * time.Second)
@@ -81,8 +78,6 @@ func testMutexLock(t *testing.T, waiters int, chooseClient func() *clientv3.Clie
 		select {
 		case <-timerC:
 			t.Fatalf("timed out waiting for lock %d", i)
-		case err := <-errC:
-			t.Fatalf("Unexpected error: %v", err)
 		case m := <-lockedC:
 			// lock acquired with m
 			select {
@@ -95,63 +90,60 @@ func testMutexLock(t *testing.T, waiters int, chooseClient func() *clientv3.Clie
 			}
 		}
 	}
-	wg.Wait()
 }
 
 func TestMutexTryLockSingleNode(t *testing.T) {
-	integration2.BeforeTest(t)
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	integration.BeforeTest(t)
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
-	t.Logf("3 nodes cluster created...")
+
 	var clients []*clientv3.Client
-	testMutexTryLock(t, 5, integration2.MakeSingleNodeClients(t, clus, &clients))
-	integration2.CloseClients(t, clients)
+	testMutexTryLock(t, 5, integration.MakeSingleNodeClients(t, clus, &clients))
+	integration.CloseClients(t, clients)
 }
 
 func TestMutexTryLockMultiNode(t *testing.T) {
-	integration2.BeforeTest(t)
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	integration.BeforeTest(t)
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	var clients []*clientv3.Client
-	testMutexTryLock(t, 5, integration2.MakeMultiNodeClients(t, clus, &clients))
-	integration2.CloseClients(t, clients)
+	testMutexTryLock(t, 5, integration.MakeMultiNodeClients(t, clus, &clients))
+	integration.CloseClients(t, clients)
 }
 
 func testMutexTryLock(t *testing.T, lockers int, chooseClient func() *clientv3.Client) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	integration.BeforeTest(t)
 
 	lockedC := make(chan *concurrency.Mutex)
 	notlockedC := make(chan *concurrency.Mutex)
-
+	stopC := make(chan struct{})
+	defer close(stopC)
 	for i := 0; i < lockers; i++ {
-		go func(i int) {
+		go func() {
 			session, err := concurrency.NewSession(chooseClient())
 			if err != nil {
 				t.Error(err)
 			}
 			m := concurrency.NewMutex(session, "test-mutex-try-lock")
-			err = m.TryLock(ctx)
+			err = m.TryLock(context.TODO())
 			if err == nil {
 				select {
 				case lockedC <- m:
-				case <-ctx.Done():
-					t.Errorf("Thread: %v, Context failed: %v", i, err)
+				case <-stopC:
 				}
 			} else if err == concurrency.ErrLocked {
 				select {
 				case notlockedC <- m:
-				case <-ctx.Done():
-					t.Errorf("Thread: %v, Context failed: %v", i, err)
+				case <-stopC:
 				}
 			} else {
-				t.Errorf("Thread: %v; Unexpected Error %v", i, err)
+				t.Errorf("Unexpected Error %v", err)
 			}
-		}(i)
+		}()
 	}
 
-	timerC := time.After(30 * time.Second)
+	timerC := time.After(time.Second)
 	select {
 	case <-lockedC:
 		for i := 0; i < lockers-1; i++ {
@@ -164,16 +156,16 @@ func testMutexTryLock(t *testing.T, lockers int, chooseClient func() *clientv3.C
 			}
 		}
 	case <-timerC:
-		t.Errorf("timed out waiting for lock (30s)")
+		t.Errorf("timed out waiting for lock")
 	}
 }
 
 // TestMutexSessionRelock ensures that acquiring the same lock with the same
 // session will not result in deadlock.
 func TestMutexSessionRelock(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 	session, err := concurrency.NewSession(clus.RandClient())
 	if err != nil {
@@ -195,9 +187,9 @@ func TestMutexSessionRelock(t *testing.T) {
 // waiters older than the new owner are gone by testing the case where
 // the waiter prior to the acquirer expires before the current holder.
 func TestMutexWaitsOnCurrentHolder(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	cctx := context.Background()
@@ -303,9 +295,9 @@ func TestMutexWaitsOnCurrentHolder(t *testing.T) {
 }
 
 func BenchmarkMutex4Waiters(b *testing.B) {
-	integration2.BeforeTest(b)
+	integration.BeforeTest(b)
 	// XXX switch tests to use TB interface
-	clus := integration2.NewCluster(nil, &integration2.ClusterConfig{Size: 3})
+	clus := integration.NewClusterV3(nil, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(nil)
 	for i := 0; i < b.N; i++ {
 		testMutexLock(nil, 4, func() *clientv3.Client { return clus.RandClient() })
@@ -313,15 +305,15 @@ func BenchmarkMutex4Waiters(b *testing.B) {
 }
 
 func TestRWMutexSingleNode(t *testing.T) {
-	integration2.BeforeTest(t)
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	integration.BeforeTest(t)
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 	testRWMutex(t, 5, func() *clientv3.Client { return clus.Client(0) })
 }
 
 func TestRWMutexMultiNode(t *testing.T) {
-	integration2.BeforeTest(t)
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	integration.BeforeTest(t)
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 	testRWMutex(t, 5, func() *clientv3.Client { return clus.RandClient() })
 }

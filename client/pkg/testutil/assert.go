@@ -15,17 +15,33 @@
 package testutil
 
 import (
+	"fmt"
+	"reflect"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
 )
 
-func AssertNil(t *testing.T, v any) {
+func AssertEqual(t *testing.T, e, a interface{}, msg ...string) {
 	t.Helper()
-	assert.Nil(t, v)
+	if (e == nil || a == nil) && (isNil(e) && isNil(a)) {
+		return
+	}
+	if reflect.DeepEqual(e, a) {
+		return
+	}
+	s := ""
+	if len(msg) > 1 {
+		s = msg[0] + ": "
+	}
+	s = fmt.Sprintf("%sexpected %+v, got %+v", s, e, a)
+	FatalStack(t, s)
 }
 
-func AssertNotNil(t *testing.T, v any) {
+func AssertNil(t *testing.T, v interface{}) {
+	t.Helper()
+	AssertEqual(t, nil, v)
+}
+
+func AssertNotNil(t *testing.T, v interface{}) {
 	t.Helper()
 	if v == nil {
 		t.Fatalf("expected non-nil, got %+v", v)
@@ -34,10 +50,18 @@ func AssertNotNil(t *testing.T, v any) {
 
 func AssertTrue(t *testing.T, v bool, msg ...string) {
 	t.Helper()
-	assert.Equal(t, true, v, msg)
+	AssertEqual(t, true, v, msg...)
 }
 
 func AssertFalse(t *testing.T, v bool, msg ...string) {
 	t.Helper()
-	assert.Equal(t, false, v, msg)
+	AssertEqual(t, false, v, msg...)
+}
+
+func isNil(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	return rv.Kind() != reflect.Struct && rv.IsNil()
 }

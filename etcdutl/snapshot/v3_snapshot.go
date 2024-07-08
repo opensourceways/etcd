@@ -15,7 +15,6 @@
 package snapshot
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -27,40 +26,39 @@ import (
 	"reflect"
 	"strings"
 
-	"go.uber.org/zap"
-
 	bolt "go.etcd.io/bbolt"
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
-	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/snapshot"
+	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v2store"
 	"go.etcd.io/etcd/server/v3/etcdserver/cindex"
-	"go.etcd.io/etcd/server/v3/storage/backend"
-	"go.etcd.io/etcd/server/v3/storage/mvcc"
-	"go.etcd.io/etcd/server/v3/storage/schema"
-	"go.etcd.io/etcd/server/v3/storage/wal"
-	"go.etcd.io/etcd/server/v3/storage/wal/walpb"
+	"go.etcd.io/etcd/server/v3/mvcc"
+	"go.etcd.io/etcd/server/v3/mvcc/backend"
+	"go.etcd.io/etcd/server/v3/mvcc/buckets"
 	"go.etcd.io/etcd/server/v3/verify"
-	"go.etcd.io/raft/v3"
-	"go.etcd.io/raft/v3/raftpb"
+	"go.etcd.io/etcd/server/v3/wal"
+	"go.etcd.io/etcd/server/v3/wal/walpb"
+	"go.uber.org/zap"
 )
 
 // Manager defines snapshot methods.
 type Manager interface {
-	// Save fetches snapshot from remote etcd server, saves data
-	// to target path and returns server version. If the context "ctx" is canceled or timed out,
+	// Save fetches snapshot from remote etcd server and saves data
+	// to target path. If the context "ctx" is canceled or timed out,
 	// snapshot save stream will error out (e.g. context.Canceled,
 	// context.DeadlineExceeded). Make sure to specify only one endpoint
 	// in client configuration. Snapshot API must be requested to a
 	// selected node, and saved snapshot is the point-in-time state of
 	// the selected node.
-	Save(ctx context.Context, cfg clientv3.Config, dbPath string) (version string, err error)
+	Save(ctx context.Context, cfg clientv3.Config, dbPath string) error
 
 	// Status returns the snapshot file information.
 	Status(dbPath string) (Status, error)
@@ -98,8 +96,8 @@ func hasChecksum(n int64) bool {
 }
 
 // Save fetches snapshot from remote etcd server and saves data to target path.
-func (s *v3Manager) Save(ctx context.Context, cfg clientv3.Config, dbPath string) (version string, err error) {
-	return snapshot.SaveWithVersion(ctx, s.lg, cfg, dbPath)
+func (s *v3Manager) Save(ctx context.Context, cfg clientv3.Config, dbPath string) error {
+	return snapshot.Save(ctx, s.lg, cfg, dbPath)
 }
 
 // Status is the snapshot file status.
@@ -108,9 +106,6 @@ type Status struct {
 	Revision  int64  `json:"revision"`
 	TotalKey  int    `json:"totalKey"`
 	TotalSize int64  `json:"totalSize"`
-	// Version is equal to storageVersion of the snapshot
-	// Empty if server does not supports versioned snapshots (<v3.6)
-	Version string `json:"version"`
 }
 
 // Status returns the snapshot file information.
@@ -137,49 +132,31 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 			return fmt.Errorf("snapshot file integrity check failed. %d errors found.\n"+strings.Join(dbErrStrings, "\n"), len(dbErrStrings))
 		}
 		ds.TotalSize = tx.Size()
-		v := schema.ReadStorageVersionFromSnapshot(tx)
-		if v != nil {
-			ds.Version = v.String()
-		}
 		c := tx.Cursor()
 		for next, _ := c.First(); next != nil; next, _ = c.Next() {
 			b := tx.Bucket(next)
 			if b == nil {
-				return fmt.Errorf("nil bucket: %q", string(next))
+				return fmt.Errorf("cannot get hash of bucket %s", string(next))
 			}
-			_, err = h.Write(next)
-			if err != nil {
-				return fmt.Errorf("cannot hash bucket name: %q err: %w", string(next), err)
+			if _, err := h.Write(next); err != nil {
+				return fmt.Errorf("cannot write bucket %s : %v", string(next), err)
 			}
-
-			iskeyb := (bytes.Equal(next, schema.Key.Name()))
-			if err = b.ForEach(func(k, v []byte) error {
-				_, err = h.Write(k)
-				if err != nil {
-					return fmt.Errorf("cannot hash bucket key: %q err: %w", k, err)
+			iskeyb := (string(next) == "key")
+			if err := b.ForEach(func(k, v []byte) error {
+				if _, err := h.Write(k); err != nil {
+					return fmt.Errorf("cannot write to bucket %s", err.Error())
 				}
-				_, err = h.Write(v)
-				if err != nil {
-					return fmt.Errorf("cannot hash bucket key: %q value: %q err: %w", k, v, err)
+				if _, err := h.Write(v); err != nil {
+					return fmt.Errorf("cannot write to bucket %s", err.Error())
 				}
 				if iskeyb {
-					var rev mvcc.Revision
-					rev, err = bytesToRev(k)
-					if err != nil {
-						return fmt.Errorf("cannot parse revision key: %q err: %w", k, err)
-					}
-					ds.Revision = rev.Main
-
-					var kv mvccpb.KeyValue
-					err = kv.Unmarshal(v)
-					if err != nil {
-						return fmt.Errorf("cannot unmarshal value, key: %q value: %q err: %w", k, v, err)
-					}
+					rev := bytesToRev(k)
+					ds.Revision = rev.main
 				}
 				ds.TotalKey++
 				return nil
 			}); err != nil {
-				return fmt.Errorf("error during bucket key iteration, name: %q err: %w", string(next), err)
+				return fmt.Errorf("cannot write bucket %s : %v", string(next), err)
 			}
 		}
 		return nil
@@ -189,15 +166,6 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 
 	ds.Hash = h.Sum32()
 	return ds, nil
-}
-
-func bytesToRev(b []byte) (rev mvcc.Revision, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("%s", r)
-		}
-	}()
-	return mvcc.BytesToRev(b), err
 }
 
 // RestoreConfig configures snapshot restore operation.
@@ -349,10 +317,10 @@ func (s *v3Manager) saveDB() error {
 		return err
 	}
 
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
+	be := backend.NewDefaultBackend(s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 
-	err = schema.NewMembershipBackend(s.lg, be).TrimMembershipFromBackend()
+	err = membership.TrimMembershipFromBackend(s.lg, be)
 	if err != nil {
 		return err
 	}
@@ -363,7 +331,7 @@ func (s *v3Manager) saveDB() error {
 // modifyLatestRevision can increase the latest revision by the given amount and sets the scheduled compaction
 // to that revision so that the server will consider this revision compacted.
 func (s *v3Manager) modifyLatestRevision(bumpAmount uint64) error {
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath())
+	be := backend.NewDefaultBackend(s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
 	defer func() {
 		be.ForceCommit()
 		be.Close()
@@ -378,42 +346,42 @@ func (s *v3Manager) modifyLatestRevision(bumpAmount uint64) error {
 		return err
 	}
 
-	latest = s.unsafeBumpBucketsRevision(tx, latest, int64(bumpAmount))
+	latest = s.unsafeBumpRevision(tx, latest, int64(bumpAmount))
 	s.unsafeMarkRevisionCompacted(tx, latest)
 
 	return nil
 }
 
-func (s *v3Manager) unsafeBumpBucketsRevision(tx backend.UnsafeWriter, latest mvcc.Revision, amount int64) mvcc.Revision {
+func (s *v3Manager) unsafeBumpRevision(tx backend.BatchTx, latest revision, amount int64) revision {
 	s.lg.Info(
 		"bumping latest revision",
-		zap.Int64("latest-revision", latest.Main),
+		zap.Int64("latest-revision", latest.main),
 		zap.Int64("bump-amount", amount),
-		zap.Int64("new-latest-revision", latest.Main+amount),
+		zap.Int64("new-latest-revision", latest.main+amount),
 	)
 
-	latest.Main += amount
-	latest.Sub = 0
-	k := mvcc.NewRevBytes()
-	k = mvcc.RevToBytes(latest, k)
-	tx.UnsafePut(schema.Key, k, []byte{})
+	latest.main += amount
+	latest.sub = 0
+	k := make([]byte, 17)
+	revToBytes(k, latest)
+	tx.UnsafePut(buckets.Key, k, []byte{})
 
 	return latest
 }
 
-func (s *v3Manager) unsafeMarkRevisionCompacted(tx backend.UnsafeWriter, latest mvcc.Revision) {
+func (s *v3Manager) unsafeMarkRevisionCompacted(tx backend.BatchTx, latest revision) {
 	s.lg.Info(
 		"marking revision compacted",
-		zap.Int64("revision", latest.Main),
+		zap.Int64("revision", latest.main),
 	)
 
-	mvcc.UnsafeSetScheduledCompact(tx, latest.Main)
+	mvcc.UnsafeSetScheduledCompact(tx, latest.main)
 }
 
-func (s *v3Manager) unsafeGetLatestRevision(tx backend.UnsafeReader) (mvcc.Revision, error) {
-	var latest mvcc.Revision
-	err := tx.UnsafeForEach(schema.Key, func(k, _ []byte) (err error) {
-		rev := mvcc.BytesToRev(k)
+func (s *v3Manager) unsafeGetLatestRevision(tx backend.BatchTx) (revision, error) {
+	var latest revision
+	err := tx.UnsafeForEach(buckets.Key, func(k, _ []byte) (err error) {
+		rev := bytesToRev(k)
 
 		if rev.GreaterThan(latest) {
 			latest = rev
@@ -503,10 +471,12 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 		return nil, err
 	}
 
-	// add members again to persist them to the backend we create.
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
+	// add members again to persist them to the store we create.
+	st := v2store.New(etcdserver.StoreClusterPrefix, etcdserver.StoreKeysPrefix)
+	s.cl.SetStore(st)
+	be := backend.NewDefaultBackend(s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
-	s.cl.SetBackend(schema.NewMembershipBackend(s.lg, be))
+	s.cl.SetBackend(be)
 	for _, m := range s.cl.Members() {
 		s.cl.AddMember(m, true)
 	}
@@ -563,11 +533,15 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 		return nil, err
 	}
 
+	b, berr := st.Save()
+	if berr != nil {
+		return nil, berr
+	}
 	confState := raftpb.ConfState{
 		Voters: nodeIDs,
 	}
 	raftSnap := raftpb.Snapshot{
-		Data: etcdserver.GetMembershipInfoInV2Format(s.lg, s.cl),
+		Data: b,
 		Metadata: raftpb.SnapshotMetadata{
 			Index:     commit,
 			Term:      term,
@@ -583,9 +557,9 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 }
 
 func (s *v3Manager) updateCIndex(commit uint64, term uint64) error {
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
+	be := backend.NewDefaultBackend(s.outDbPath())
 	defer be.Close()
 
-	cindex.UpdateConsistentIndexForce(be.BatchTx(), commit, term)
+	cindex.UpdateConsistentIndex(be.BatchTx(), commit, term)
 	return nil
 }

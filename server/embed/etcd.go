@@ -16,9 +16,9 @@ package embed
 
 import (
 	"context"
-	"errors"
+	"crypto/tls"
 	"fmt"
-	"io"
+	"io/ioutil"
 	defaultLog "log"
 	"math"
 	"net"
@@ -27,16 +27,8 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
-
-	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
-	"github.com/soheilhy/cmux"
-	"go.uber.org/zap"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/keepalive"
 
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
@@ -48,8 +40,18 @@ import (
 	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
-	"go.etcd.io/etcd/server/v3/storage"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v2http"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v2v3"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v3client"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v3rpc"
 	"go.etcd.io/etcd/server/v3/verify"
+
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"github.com/soheilhy/cmux"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 )
 
 const (
@@ -124,7 +126,7 @@ func StartEtcd(inCfg *Config) (e *Etcd, err error) {
 	}
 	e.cfg.logger.Info(
 		"configuring peer listeners",
-		zap.Strings("listen-peer-urls", e.cfg.getListenPeerURLs()),
+		zap.Strings("listen-peer-urls", e.cfg.getListenPeerUrls()),
 	)
 	if e.Peers, err = configurePeerListeners(cfg); err != nil {
 		return e, err
@@ -132,7 +134,7 @@ func StartEtcd(inCfg *Config) (e *Etcd, err error) {
 
 	e.cfg.logger.Info(
 		"configuring client listeners",
-		zap.Strings("listen-client-urls", e.cfg.getListenClientURLs()),
+		zap.Strings("listen-client-urls", e.cfg.getListenClientUrls()),
 	)
 	if e.sctxs, err = configureClientListeners(cfg); err != nil {
 		return e, err
@@ -180,7 +182,6 @@ func StartEtcd(inCfg *Config) (e *Etcd, err error) {
 		InitialClusterToken:                      token,
 		DiscoveryURL:                             cfg.Durl,
 		DiscoveryProxy:                           cfg.Dproxy,
-		DiscoveryCfg:                             cfg.DiscoveryCfg,
 		NewCluster:                               cfg.IsNewCluster(),
 		PeerTLSInfo:                              cfg.PeerTLSInfo,
 		TickMs:                                   cfg.TickMs,
@@ -216,37 +217,29 @@ func StartEtcd(inCfg *Config) (e *Etcd, err error) {
 		EnableLeaseCheckpoint:                    cfg.ExperimentalEnableLeaseCheckpoint,
 		LeaseCheckpointPersist:                   cfg.ExperimentalEnableLeaseCheckpointPersist,
 		CompactionBatchLimit:                     cfg.ExperimentalCompactionBatchLimit,
-		CompactionSleepInterval:                  cfg.ExperimentalCompactionSleepInterval,
 		WatchProgressNotifyInterval:              cfg.ExperimentalWatchProgressNotifyInterval,
 		DowngradeCheckTime:                       cfg.ExperimentalDowngradeCheckTime,
 		WarningApplyDuration:                     cfg.ExperimentalWarningApplyDuration,
-		WarningUnaryRequestDuration:              cfg.WarningUnaryRequestDuration,
 		ExperimentalMemoryMlock:                  cfg.ExperimentalMemoryMlock,
 		ExperimentalTxnModeWriteWithSharedBuffer: cfg.ExperimentalTxnModeWriteWithSharedBuffer,
 		ExperimentalStopGRPCServiceOnDefrag:      cfg.ExperimentalStopGRPCServiceOnDefrag,
 		ExperimentalBootstrapDefragThresholdMegabytes: cfg.ExperimentalBootstrapDefragThresholdMegabytes,
-		ExperimentalMaxLearners:                       cfg.ExperimentalMaxLearners,
-		V2Deprecation:                                 cfg.V2DeprecationEffective(),
-		ExperimentalLocalAddress:                      cfg.InferLocalAddr(),
+		V2Deprecation: cfg.V2DeprecationEffective(),
 	}
 
 	if srvcfg.ExperimentalEnableDistributedTracing {
 		tctx := context.Background()
-		tracingExporter, terr := newTracingExporter(tctx, cfg)
-		if terr != nil {
-			return e, terr
+		tracingExporter, err := newTracingExporter(tctx, cfg)
+		if err != nil {
+			return e, err
 		}
 		e.tracingExporterShutdown = func() {
 			tracingExporter.Close(tctx)
 		}
 		srvcfg.ExperimentalTracerOptions = tracingExporter.opts
 
-		e.cfg.logger.Info(
-			"distributed tracing setup enabled",
-		)
+		e.cfg.logger.Info("distributed tracing setup enabled")
 	}
-
-	srvcfg.PeerTLSInfo.LocalAddr = srvcfg.ExperimentalLocalAddress
 
 	print(e.cfg.logger, *cfg, srvcfg, memberInitialized)
 
@@ -272,21 +265,23 @@ func StartEtcd(inCfg *Config) (e *Etcd, err error) {
 	}
 	e.Server.Start()
 
-	e.servePeers()
-
-	e.serveClients()
-
+	if err = e.servePeers(); err != nil {
+		return e, err
+	}
+	if err = e.serveClients(); err != nil {
+		return e, err
+	}
 	if err = e.serveMetrics(); err != nil {
 		return e, err
 	}
 
 	e.cfg.logger.Info(
 		"now serving peer/client/metrics",
-		zap.String("local-member-id", e.Server.MemberID().String()),
-		zap.Strings("initial-advertise-peer-urls", e.cfg.getAdvertisePeerURLs()),
-		zap.Strings("listen-peer-urls", e.cfg.getListenPeerURLs()),
-		zap.Strings("advertise-client-urls", e.cfg.getAdvertiseClientURLs()),
-		zap.Strings("listen-client-urls", e.cfg.getListenClientURLs()),
+		zap.String("local-member-id", e.Server.ID().String()),
+		zap.Strings("initial-advertise-peer-urls", e.cfg.getAdvertisePeerUrls()),
+		zap.Strings("listen-peer-urls", e.cfg.getListenPeerUrls()),
+		zap.Strings("advertise-client-urls", e.cfg.getAdvertiseClientUrls()),
+		zap.Strings("listen-client-urls", e.cfg.getListenClientUrls()),
 		zap.Strings("listen-metrics-urls", e.cfg.getMetricsURLs()),
 	)
 	serving = true
@@ -308,7 +303,7 @@ func print(lg *zap.Logger, ec Config, sc config.ServerConfig, memberInitialized 
 
 	quota := ec.QuotaBackendBytes
 	if quota == 0 {
-		quota = storage.DefaultQuotaBytes
+		quota = etcdserver.DefaultQuotaBytes
 	}
 
 	lg.Info(
@@ -334,13 +329,11 @@ func print(lg *zap.Logger, ec Config, sc config.ServerConfig, memberInitialized 
 		zap.Uint("max-wals", sc.MaxWALFiles),
 		zap.Uint("max-snapshots", sc.MaxSnapFiles),
 		zap.Uint64("snapshot-catchup-entries", sc.SnapshotCatchUpEntries),
-		zap.Strings("initial-advertise-peer-urls", ec.getAdvertisePeerURLs()),
-		zap.Strings("listen-peer-urls", ec.getListenPeerURLs()),
-		zap.Strings("advertise-client-urls", ec.getAdvertiseClientURLs()),
-		zap.Strings("listen-client-urls", ec.getListenClientURLs()),
+		zap.Strings("initial-advertise-peer-urls", ec.getAdvertisePeerUrls()),
+		zap.Strings("listen-peer-urls", ec.getListenPeerUrls()),
+		zap.Strings("advertise-client-urls", ec.getAdvertiseClientUrls()),
+		zap.Strings("listen-client-urls", ec.getListenClientUrls()),
 		zap.Strings("listen-metrics-urls", ec.getMetricsURLs()),
-		zap.Bool("experimental-set-member-localaddr", ec.ExperimentalSetMemberLocalAddr),
-		zap.String("experimental-local-address", sc.ExperimentalLocalAddress),
 		zap.Strings("cors", cors),
 		zap.Strings("host-whitelist", hss),
 		zap.String("initial-cluster", sc.InitialPeerURLsMap.String()),
@@ -360,22 +353,7 @@ func print(lg *zap.Logger, ec Config, sc config.ServerConfig, memberInitialized 
 		zap.String("auto-compaction-interval", sc.AutoCompactionRetention.String()),
 		zap.String("discovery-url", sc.DiscoveryURL),
 		zap.String("discovery-proxy", sc.DiscoveryProxy),
-
-		zap.String("discovery-token", sc.DiscoveryCfg.Token),
-		zap.String("discovery-endpoints", strings.Join(sc.DiscoveryCfg.Endpoints, ",")),
-		zap.String("discovery-dial-timeout", sc.DiscoveryCfg.DialTimeout.String()),
-		zap.String("discovery-request-timeout", sc.DiscoveryCfg.RequestTimeout.String()),
-		zap.String("discovery-keepalive-time", sc.DiscoveryCfg.KeepAliveTime.String()),
-		zap.String("discovery-keepalive-timeout", sc.DiscoveryCfg.KeepAliveTimeout.String()),
-		zap.Bool("discovery-insecure-transport", sc.DiscoveryCfg.Secure.InsecureTransport),
-		zap.Bool("discovery-insecure-skip-tls-verify", sc.DiscoveryCfg.Secure.InsecureSkipVerify),
-		zap.String("discovery-cert", sc.DiscoveryCfg.Secure.Cert),
-		zap.String("discovery-key", sc.DiscoveryCfg.Secure.Key),
-		zap.String("discovery-cacert", sc.DiscoveryCfg.Secure.Cacert),
-		zap.String("discovery-user", sc.DiscoveryCfg.Auth.Username),
-
 		zap.String("downgrade-check-interval", sc.DowngradeCheckTime.String()),
-		zap.Int("max-learners", sc.ExperimentalMaxLearners),
 	)
 }
 
@@ -391,8 +369,8 @@ func (e *Etcd) Close() {
 	fields := []zap.Field{
 		zap.String("name", e.cfg.Name),
 		zap.String("data-dir", e.cfg.Dir),
-		zap.Strings("advertise-peer-urls", e.cfg.getAdvertisePeerURLs()),
-		zap.Strings("advertise-client-urls", e.cfg.getAdvertiseClientURLs()),
+		zap.Strings("advertise-peer-urls", e.cfg.getAdvertisePeerUrls()),
+		zap.Strings("advertise-client-urls", e.cfg.getAdvertiseClientUrls()),
 	}
 	lg := e.GetLogger()
 	lg.Info("closing etcd server", fields...)
@@ -510,7 +488,9 @@ func configurePeerListeners(cfg *Config) (peers []*peerListener, err error) {
 	if err = cfg.PeerSelfCert(); err != nil {
 		cfg.logger.Fatal("failed to get peer self-signed certs", zap.Error(err))
 	}
+
 	updateMinMaxVersions(&cfg.PeerTLSInfo, cfg.TlsMinVersion, cfg.TlsMaxVersion)
+
 	if !cfg.PeerTLSInfo.Empty() {
 		cfg.logger.Info(
 			"starting with peer TLS",
@@ -566,16 +546,24 @@ func configurePeerListeners(cfg *Config) (peers []*peerListener, err error) {
 }
 
 // configure peer handlers after rafthttp.Transport started
-func (e *Etcd) servePeers() {
+func (e *Etcd) servePeers() (err error) {
 	ph := etcdhttp.NewPeerHandler(e.GetLogger(), e.Server)
+	var peerTLScfg *tls.Config
+	if !e.cfg.PeerTLSInfo.Empty() {
+		if peerTLScfg, err = e.cfg.PeerTLSInfo.ServerConfig(); err != nil {
+			return err
+		}
+	}
 
 	for _, p := range e.Peers {
 		u := p.Listener.Addr().String()
+		gs := v3rpc.Server(e.Server, peerTLScfg, nil)
 		m := cmux.New(p.Listener)
+		go gs.Serve(m.Match(cmux.HTTP2()))
 		srv := &http.Server{
-			Handler:     ph,
+			Handler:     grpcHandlerFunc(gs, ph),
 			ReadTimeout: 5 * time.Minute,
-			ErrorLog:    defaultLog.New(io.Discard, "", 0), // do not log user error
+			ErrorLog:    defaultLog.New(ioutil.Discard, "", 0), // do not log user error
 		}
 		go srv.Serve(m.Match(cmux.Any()))
 		p.serve = func() error {
@@ -593,7 +581,7 @@ func (e *Etcd) servePeers() {
 				"stopping serving peer traffic",
 				zap.String("address", u),
 			)
-			srv.Shutdown(ctx)
+			stopServers(ctx, &servers{secure: peerTLScfg != nil, grpc: gs, http: srv})
 			e.cfg.logger.Info(
 				"stopped serving peer traffic",
 				zap.String("address", u),
@@ -614,6 +602,7 @@ func (e *Etcd) servePeers() {
 			e.errHandler(l.serve())
 		}(pl)
 	}
+	return nil
 }
 
 func configureClientListeners(cfg *Config) (sctxs map[string]*serveCtx, err error) {
@@ -623,7 +612,9 @@ func configureClientListeners(cfg *Config) (sctxs map[string]*serveCtx, err erro
 	if err = cfg.ClientSelfCert(); err != nil {
 		cfg.logger.Fatal("failed to get client self-signed certs", zap.Error(err))
 	}
+
 	updateMinMaxVersions(&cfg.ClientTLSInfo, cfg.TlsMinVersion, cfg.TlsMaxVersion)
+
 	if cfg.EnablePprof {
 		cfg.logger.Info("pprof is enabled", zap.String("path", debugutil.HTTPPrefixPProf))
 	}
@@ -644,7 +635,7 @@ func configureClientListeners(cfg *Config) (sctxs map[string]*serveCtx, err erro
 	}
 
 	for _, u := range cfg.ListenClientUrls {
-		addr, secure, network := resolveURL(u)
+		addr, secure, network := resolveUrl(u)
 		sctx := sctxs[addr]
 		if sctx == nil {
 			sctx = newServeCtx(cfg.logger)
@@ -657,7 +648,7 @@ func configureClientListeners(cfg *Config) (sctxs map[string]*serveCtx, err erro
 		sctx.network = network
 	}
 	for _, u := range cfg.ListenClientHttpUrls {
-		addr, secure, network := resolveURL(u)
+		addr, secure, network := resolveUrl(u)
 
 		sctx := sctxs[addr]
 		if sctx == nil {
@@ -720,7 +711,7 @@ func configureClientListeners(cfg *Config) (sctxs map[string]*serveCtx, err erro
 	return sctxs, nil
 }
 
-func resolveURL(u url.URL) (addr string, secure bool, network string) {
+func resolveUrl(u url.URL) (addr string, secure bool, network string) {
 	addr = u.Host
 	network = "tcp"
 	if u.Scheme == "unix" || u.Scheme == "unixs" {
@@ -731,7 +722,7 @@ func resolveURL(u url.URL) (addr string, secure bool, network string) {
 	return addr, secure, network
 }
 
-func (e *Etcd) serveClients() {
+func (e *Etcd) serveClients() (err error) {
 	if !e.cfg.ClientTLSInfo.Empty() {
 		e.cfg.logger.Info(
 			"starting with client TLS",
@@ -741,13 +732,28 @@ func (e *Etcd) serveClients() {
 	}
 
 	// Start a client server goroutine for each listen address
-	mux := http.NewServeMux()
-	etcdhttp.HandleDebug(mux)
-	etcdhttp.HandleVersion(mux, e.Server)
-	etcdhttp.HandleMetrics(mux)
-	etcdhttp.HandleHealth(e.cfg.logger, mux, e.Server)
+	var h http.Handler
+	if e.Config().EnableV2 {
+		if e.Config().V2DeprecationEffective().IsAtLeast(config.V2_DEPR_1_WRITE_ONLY) {
+			return fmt.Errorf("--enable-v2 and --v2-deprecation=%s are mutually exclusive", e.Config().V2DeprecationEffective())
+		}
+		e.cfg.logger.Warn("Flag `enable-v2` is deprecated and will get removed in etcd 3.6.")
+		if len(e.Config().ExperimentalEnableV2V3) > 0 {
+			e.cfg.logger.Warn("Flag `experimental-enable-v2v3` is deprecated and will get removed in etcd 3.6.")
+			srv := v2v3.NewServer(e.cfg.logger, v3client.New(e.Server), e.cfg.ExperimentalEnableV2V3)
+			h = v2http.NewClientHandler(e.GetLogger(), srv, e.Server.Cfg.ReqTimeout())
+		} else {
+			h = v2http.NewClientHandler(e.GetLogger(), e.Server, e.Server.Cfg.ReqTimeout())
+		}
+	} else {
+		mux := http.NewServeMux()
+		etcdhttp.HandleBasic(e.cfg.logger, mux, e.Server)
+		etcdhttp.HandleMetrics(mux)
+		etcdhttp.HandleHealth(e.cfg.logger, mux, e.Server)
+		h = mux
+	}
 
-	var gopts []grpc.ServerOption
+	gopts := []grpc.ServerOption{}
 	if e.cfg.GRPCKeepAliveMinTime > time.Duration(0) {
 		gopts = append(gopts, grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             e.cfg.GRPCKeepAliveMinTime,
@@ -761,33 +767,34 @@ func (e *Etcd) serveClients() {
 			Timeout: e.cfg.GRPCKeepAliveTimeout,
 		}))
 	}
-	gopts = append(gopts, e.cfg.GRPCAdditionalServerOptions...)
 
-	splitHTTP := false
+	splitHttp := false
 	for _, sctx := range e.sctxs {
 		if sctx.httpOnly {
-			splitHTTP = true
+			splitHttp = true
 		}
 	}
 
 	// start client servers in each goroutine
 	for _, sctx := range e.sctxs {
 		go func(s *serveCtx) {
-			e.errHandler(s.serve(e.Server, &e.cfg.ClientTLSInfo, mux, e.errHandler, e.grpcGatewayDial(splitHTTP), splitHTTP, gopts...))
+			e.errHandler(s.serve(e.Server, &e.cfg.ClientTLSInfo, h, e.errHandler, e.grpcGatewayDial(splitHttp), splitHttp, gopts...))
 		}(sctx)
 	}
+	return nil
 }
 
-func (e *Etcd) grpcGatewayDial(splitHTTP bool) (grpcDial func(ctx context.Context) (*grpc.ClientConn, error)) {
+func (e *Etcd) grpcGatewayDial(splitHttp bool) (grpcDial func(ctx context.Context) (*grpc.ClientConn, error)) {
 	if !e.cfg.EnableGRPCGateway {
 		return nil
 	}
-	sctx := e.pickGRPCGatewayServeContext(splitHTTP)
+	sctx := e.pickGrpcGatewayServeContext(splitHttp)
 	addr := sctx.addr
 	if network := sctx.network; network == "unix" {
 		// explicitly define unix network for gRPC socket support
 		addr = fmt.Sprintf("%s:%s", network, addr)
 	}
+
 	opts := []grpc.DialOption{grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(math.MaxInt32))}
 	if sctx.secure {
 		tlscfg, tlsErr := e.cfg.ClientTLSInfo.ServerConfig()
@@ -799,7 +806,8 @@ func (e *Etcd) grpcGatewayDial(splitHTTP bool) (grpcDial func(ctx context.Contex
 		dtls := tlscfg.Clone()
 		// trust local server
 		dtls.InsecureSkipVerify = true
-		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTransportCredential(dtls)))
+		bundle := credentials.NewBundle(credentials.Config{TLSConfig: dtls})
+		opts = append(opts, grpc.WithTransportCredentials(bundle.TransportCredentials()))
 	} else {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
@@ -814,31 +822,13 @@ func (e *Etcd) grpcGatewayDial(splitHTTP bool) (grpcDial func(ctx context.Contex
 	}
 }
 
-func (e *Etcd) pickGRPCGatewayServeContext(splitHTTP bool) *serveCtx {
+func (e *Etcd) pickGrpcGatewayServeContext(splitHttp bool) *serveCtx {
 	for _, sctx := range e.sctxs {
-		if !splitHTTP || !sctx.httpOnly {
+		if !splitHttp || !sctx.httpOnly {
 			return sctx
 		}
 	}
 	panic("Expect at least one context able to serve grpc")
-}
-
-var ErrMissingClientTLSInfoForMetricsURL = errors.New("client TLS key/cert (--cert-file, --key-file) must be provided for metrics secure url")
-
-func (e *Etcd) createMetricsListener(murl url.URL) (net.Listener, error) {
-	tlsInfo := &e.cfg.ClientTLSInfo
-	switch murl.Scheme {
-	case "http":
-		tlsInfo = nil
-	case "https", "unixs":
-		if e.cfg.ClientTLSInfo.Empty() {
-			return nil, ErrMissingClientTLSInfoForMetricsURL
-		}
-	}
-	return transport.NewListenerWithOpts(murl.Host, murl.Scheme,
-		transport.WithTLSInfo(tlsInfo),
-		transport.WithSocketOpts(&e.cfg.SocketOpts),
-	)
 }
 
 func (e *Etcd) serveMetrics() (err error) {
@@ -852,7 +842,14 @@ func (e *Etcd) serveMetrics() (err error) {
 		etcdhttp.HandleHealth(e.cfg.logger, metricsMux, e.Server)
 
 		for _, murl := range e.cfg.ListenMetricsUrls {
-			ml, err := e.createMetricsListener(murl)
+			tlsInfo := &e.cfg.ClientTLSInfo
+			if murl.Scheme == "http" {
+				tlsInfo = nil
+			}
+			ml, err := transport.NewListenerWithOpts(murl.Host, murl.Scheme,
+				transport.WithTLSInfo(tlsInfo),
+				transport.WithSocketOpts(&e.cfg.SocketOpts),
+			)
 			if err != nil {
 				return err
 			}
@@ -870,9 +867,6 @@ func (e *Etcd) serveMetrics() (err error) {
 }
 
 func (e *Etcd) errHandler(err error) {
-	if err != nil {
-		e.GetLogger().Error("setting up serving from embedded etcd failed.", zap.Error(err))
-	}
 	select {
 	case <-e.stopc:
 		return
@@ -900,8 +894,6 @@ func parseCompactionRetention(mode, retention string) (ret time.Duration, err er
 			ret = time.Duration(int64(h))
 		case CompactorModePeriodic:
 			ret = time.Duration(int64(h)) * time.Hour
-		case "":
-			return 0, errors.New("--auto-compaction-mode is undefined")
 		}
 	} else {
 		// periodic compaction

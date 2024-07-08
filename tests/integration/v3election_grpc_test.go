@@ -22,26 +22,25 @@ import (
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	epb "go.etcd.io/etcd/server/v3/etcdserver/api/v3election/v3electionpb"
-	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 // TestV3ElectionCampaign checks that Campaign will not give
 // simultaneous leadership to multiple campaigners.
 func TestV3ElectionCampaign(t *testing.T) {
-	integration.BeforeTest(t)
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	BeforeTest(t)
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
-	lease1, err1 := integration.ToGRPC(clus.RandClient()).Lease.LeaseGrant(context.TODO(), &pb.LeaseGrantRequest{TTL: 30})
+	lease1, err1 := toGRPC(clus.RandClient()).Lease.LeaseGrant(context.TODO(), &pb.LeaseGrantRequest{TTL: 30})
 	if err1 != nil {
 		t.Fatal(err1)
 	}
-	lease2, err2 := integration.ToGRPC(clus.RandClient()).Lease.LeaseGrant(context.TODO(), &pb.LeaseGrantRequest{TTL: 30})
+	lease2, err2 := toGRPC(clus.RandClient()).Lease.LeaseGrant(context.TODO(), &pb.LeaseGrantRequest{TTL: 30})
 	if err2 != nil {
 		t.Fatal(err2)
 	}
 
-	lc := integration.ToGRPC(clus.Client(0)).Election
+	lc := toGRPC(clus.Client(0)).Election
 	req1 := &epb.CampaignRequest{Name: []byte("foo"), Lease: lease1.ID, Value: []byte("abc")}
 	l1, lerr1 := lc.Campaign(context.TODO(), req1)
 	if lerr1 != nil {
@@ -90,11 +89,11 @@ func TestV3ElectionCampaign(t *testing.T) {
 // TestV3ElectionObserve checks that an Observe stream receives
 // proclamations from different leaders uninterrupted.
 func TestV3ElectionObserve(t *testing.T) {
-	integration.BeforeTest(t)
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	BeforeTest(t)
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
-	lc := integration.ToGRPC(clus.Client(0)).Election
+	lc := toGRPC(clus.Client(0)).Election
 
 	// observe leadership events
 	observec := make(chan struct{}, 1)
@@ -126,7 +125,7 @@ func TestV3ElectionObserve(t *testing.T) {
 		t.Fatalf("observe stream took too long to start")
 	}
 
-	lease1, err1 := integration.ToGRPC(clus.RandClient()).Lease.LeaseGrant(context.TODO(), &pb.LeaseGrantRequest{TTL: 30})
+	lease1, err1 := toGRPC(clus.RandClient()).Lease.LeaseGrant(context.TODO(), &pb.LeaseGrantRequest{TTL: 30})
 	if err1 != nil {
 		t.Fatal(err1)
 	}
@@ -140,7 +139,7 @@ func TestV3ElectionObserve(t *testing.T) {
 	go func() {
 		defer close(leader2c)
 
-		lease2, err2 := integration.ToGRPC(clus.RandClient()).Lease.LeaseGrant(context.TODO(), &pb.LeaseGrantRequest{TTL: 30})
+		lease2, err2 := toGRPC(clus.RandClient()).Lease.LeaseGrant(context.TODO(), &pb.LeaseGrantRequest{TTL: 30})
 		if err2 != nil {
 			t.Error(err2)
 		}

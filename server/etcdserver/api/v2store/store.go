@@ -23,10 +23,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jonboulle/clockwork"
-
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v2error"
+
+	"github.com/jonboulle/clockwork"
 )
 
 // The default version to set when the store is first initialized.
@@ -99,7 +99,7 @@ func newStore(namespaces ...string) *store {
 	}
 	s.Stats = newStats()
 	s.WatcherHub = newWatchHub(1000)
-	s.ttlKeyHeap = newTTLKeyHeap()
+	s.ttlKeyHeap = newTtlKeyHeap()
 	s.readonlySet = types.NewUnsafeSet(append(namespaces, "/")...)
 	return s
 }
@@ -781,17 +781,15 @@ func (s *store) Recovery(state []byte) error {
 		return err
 	}
 
-	s.ttlKeyHeap = newTTLKeyHeap()
+	s.ttlKeyHeap = newTtlKeyHeap()
 
 	s.Root.recoverAndclean()
 	return nil
 }
 
-//revive:disable:var-naming
 func (s *store) JsonStats() []byte {
-	//revive:enable:var-naming
 	s.Stats.Watchers = uint64(s.WatcherHub.count)
-	return s.Stats.toJSON()
+	return s.Stats.toJson()
 }
 
 func (s *store) HasTTLKeys() bool {

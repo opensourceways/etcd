@@ -31,9 +31,6 @@ const (
 
 	jwtECPubKey  = "../../tests/fixtures/server-ecdsa.crt"
 	jwtECPrivKey = "../../tests/fixtures/server-ecdsa.key.insecure"
-
-	jwtEdPubKey  = "../../tests/fixtures/ed25519-public-key.pem"
-	jwtEdPrivKey = "../../tests/fixtures/ed25519-private-key.pem"
 )
 
 func TestJWTInfo(t *testing.T) {
@@ -65,15 +62,6 @@ func TestJWTInfo(t *testing.T) {
 			"pub-key":     jwtECPubKey,
 			"priv-key":    jwtECPrivKey,
 			"sign-method": "ES256",
-		},
-		"Ed25519-priv": {
-			"priv-key":    jwtEdPrivKey,
-			"sign-method": "EdDSA",
-		},
-		"Ed25519": {
-			"pub-key":     jwtEdPubKey,
-			"priv-key":    jwtEdPrivKey,
-			"sign-method": "EdDSA",
 		},
 		"HMAC": {
 			"priv-key":    jwtECPrivKey, // any file, raw bytes used as shared secret
@@ -147,6 +135,77 @@ func testJWTInfo(t *testing.T, opts map[string]string) {
 	}
 }
 
+func TestJWTBad(t *testing.T) {
+
+	var badCases = map[string]map[string]string{
+		"no options": {},
+		"invalid method": {
+			"sign-method": "invalid",
+		},
+		"rsa no key": {
+			"sign-method": "RS256",
+		},
+		"invalid ttl": {
+			"sign-method": "RS256",
+			"ttl":         "forever",
+		},
+		"rsa invalid public key": {
+			"sign-method": "RS256",
+			"pub-key":     jwtRSAPrivKey,
+			"priv-key":    jwtRSAPrivKey,
+		},
+		"rsa invalid private key": {
+			"sign-method": "RS256",
+			"pub-key":     jwtRSAPubKey,
+			"priv-key":    jwtRSAPubKey,
+		},
+		"hmac no key": {
+			"sign-method": "HS256",
+		},
+		"hmac pub key": {
+			"sign-method": "HS256",
+			"pub-key":     jwtRSAPubKey,
+		},
+		"missing public key file": {
+			"sign-method": "HS256",
+			"pub-key":     "missing-file",
+		},
+		"missing private key file": {
+			"sign-method": "HS256",
+			"priv-key":    "missing-file",
+		},
+		"ecdsa no key": {
+			"sign-method": "ES256",
+		},
+		"ecdsa invalid public key": {
+			"sign-method": "ES256",
+			"pub-key":     jwtECPrivKey,
+			"priv-key":    jwtECPrivKey,
+		},
+		"ecdsa invalid private key": {
+			"sign-method": "ES256",
+			"pub-key":     jwtECPubKey,
+			"priv-key":    jwtECPubKey,
+		},
+	}
+
+	lg := zap.NewNop()
+
+	for k, v := range badCases {
+		t.Run(k, func(t *testing.T) {
+			_, err := newTokenProviderJWT(lg, v)
+			if err == nil {
+				t.Errorf("expected error for options %v", v)
+			}
+		})
+	}
+}
+
+// testJWTOpts is useful for passing to NewTokenProvider which requires a string.
+func testJWTOpts() string {
+	return fmt.Sprintf("%s,pub-key=%s,priv-key=%s,sign-method=RS256", tokenTypeJWT, jwtRSAPubKey, jwtRSAPrivKey)
+}
+
 func TestJWTTokenWithMissingFields(t *testing.T) {
 	testCases := []struct {
 		name        string
@@ -217,75 +276,4 @@ func TestJWTTokenWithMissingFields(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestJWTBad(t *testing.T) {
-
-	var badCases = map[string]map[string]string{
-		"no options": {},
-		"invalid method": {
-			"sign-method": "invalid",
-		},
-		"rsa no key": {
-			"sign-method": "RS256",
-		},
-		"invalid ttl": {
-			"sign-method": "RS256",
-			"ttl":         "forever",
-		},
-		"rsa invalid public key": {
-			"sign-method": "RS256",
-			"pub-key":     jwtRSAPrivKey,
-			"priv-key":    jwtRSAPrivKey,
-		},
-		"rsa invalid private key": {
-			"sign-method": "RS256",
-			"pub-key":     jwtRSAPubKey,
-			"priv-key":    jwtRSAPubKey,
-		},
-		"hmac no key": {
-			"sign-method": "HS256",
-		},
-		"hmac pub key": {
-			"sign-method": "HS256",
-			"pub-key":     jwtRSAPubKey,
-		},
-		"missing public key file": {
-			"sign-method": "HS256",
-			"pub-key":     "missing-file",
-		},
-		"missing private key file": {
-			"sign-method": "HS256",
-			"priv-key":    "missing-file",
-		},
-		"ecdsa no key": {
-			"sign-method": "ES256",
-		},
-		"ecdsa invalid public key": {
-			"sign-method": "ES256",
-			"pub-key":     jwtECPrivKey,
-			"priv-key":    jwtECPrivKey,
-		},
-		"ecdsa invalid private key": {
-			"sign-method": "ES256",
-			"pub-key":     jwtECPubKey,
-			"priv-key":    jwtECPubKey,
-		},
-	}
-
-	lg := zap.NewNop()
-
-	for k, v := range badCases {
-		t.Run(k, func(t *testing.T) {
-			_, err := newTokenProviderJWT(lg, v)
-			if err == nil {
-				t.Errorf("expected error for options %v", v)
-			}
-		})
-	}
-}
-
-// testJWTOpts is useful for passing to NewTokenProvider which requires a string.
-func testJWTOpts() string {
-	return fmt.Sprintf("%s,pub-key=%s,priv-key=%s,sign-method=RS256", tokenTypeJWT, jwtRSAPubKey, jwtRSAPrivKey)
 }

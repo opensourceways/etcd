@@ -21,10 +21,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
-
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 func TestTLSClientCipherSuitesValid(t *testing.T)    { testTLSCipherSuites(t, true) }
@@ -33,7 +31,7 @@ func TestTLSClientCipherSuitesMismatch(t *testing.T) { testTLSCipherSuites(t, fa
 // testTLSCipherSuites ensures mismatching client-side cipher suite
 // fail TLS handshake with the server.
 func testTLSCipherSuites(t *testing.T, valid bool) {
-	integration.BeforeTest(t)
+	BeforeTest(t)
 
 	cipherSuites := []uint16{
 		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
@@ -43,7 +41,7 @@ func testTLSCipherSuites(t *testing.T, valid bool) {
 		tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
 		tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
 	}
-	srvTLS, cliTLS := integration.TestTLSInfo, integration.TestTLSInfo
+	srvTLS, cliTLS := TestTLSInfo, TestTLSInfo
 	if valid {
 		srvTLS.CipherSuites, cliTLS.CipherSuites = cipherSuites, cipherSuites
 	} else {
@@ -56,15 +54,15 @@ func testTLSCipherSuites(t *testing.T, valid bool) {
 	srvTLS.MaxVersion = tls.VersionTLS12
 	cliTLS.MaxVersion = tls.VersionTLS12
 
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1, ClientTLS: &srvTLS})
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1, ClientTLS: &srvTLS})
 	defer clus.Terminate(t)
 
 	cc, err := cliTLS.ClientConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cli, cerr := integration.NewClient(t, clientv3.Config{
-		Endpoints:   []string{clus.Members[0].GRPCURL},
+	cli, cerr := NewClient(t, clientv3.Config{
+		Endpoints:   []string{clus.Members[0].GRPCURL()},
 		DialTimeout: time.Second,
 		DialOptions: []grpc.DialOption{grpc.WithBlock()},
 		TLS:         cc,
@@ -81,7 +79,8 @@ func testTLSCipherSuites(t *testing.T, valid bool) {
 }
 
 func TestTLSMinMaxVersion(t *testing.T) {
-	integration.BeforeTest(t)
+
+	BeforeTest(t)
 
 	tests := []struct {
 		name        string
@@ -113,21 +112,21 @@ func TestTLSMinMaxVersion(t *testing.T) {
 	}
 
 	// Configure server to support TLS 1.3 only.
-	srvTLS := integration.TestTLSInfo
+	srvTLS := TestTLSInfo
 	srvTLS.MinVersion = tls.VersionTLS13
 	srvTLS.MaxVersion = tls.VersionTLS13
-	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1, ClientTLS: &srvTLS})
+	clus := NewClusterV3(t, &ClusterConfig{Size: 1, ClientTLS: &srvTLS})
 	defer clus.Terminate(t)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cc, err := integration.TestTLSInfo.ClientConfig()
+			cc, err := TestTLSInfo.ClientConfig()
 			assert.NoError(t, err)
 
 			cc.MinVersion = tt.minVersion
 			cc.MaxVersion = tt.maxVersion
-			cli, cerr := integration.NewClient(t, clientv3.Config{
-				Endpoints:   []string{clus.Members[0].GRPCURL},
+			cli, cerr := NewClient(t, clientv3.Config{
+				Endpoints:   []string{clus.Members[0].GRPCURL()},
 				DialTimeout: time.Second,
 				DialOptions: []grpc.DialOption{grpc.WithBlock()},
 				TLS:         cc,

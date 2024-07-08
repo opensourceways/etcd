@@ -47,23 +47,22 @@ func TestWriteReadTimeoutListener(t *testing.T) {
 		writeTimeout: 10 * time.Millisecond,
 		readTimeout:  10 * time.Millisecond,
 	}
+	stop := make(chan struct{}, 1)
 
-	blocker := func(stopCh <-chan struct{}) {
+	blocker := func() {
 		conn, derr := net.Dial("tcp", ln.Addr().String())
 		if derr != nil {
 			t.Errorf("unexpected dail error: %v", derr)
 		}
 		defer conn.Close()
 		// block the receiver until the writer timeout
-		<-stopCh
+		<-stop
 	}
-
-	writerStopCh := make(chan struct{}, 1)
-	go blocker(writerStopCh)
+	go blocker()
 
 	conn, err := wln.Accept()
 	if err != nil {
-		writerStopCh <- struct{}{}
+		stop <- struct{}{}
 		t.Fatalf("unexpected accept error: %v", err)
 	}
 	defer conn.Close()
@@ -80,21 +79,20 @@ func TestWriteReadTimeoutListener(t *testing.T) {
 	case <-done:
 	// It waits 1s more to avoid delay in low-end system.
 	case <-time.After(wln.writeTimeout*10 + time.Second):
-		writerStopCh <- struct{}{}
+		stop <- struct{}{}
 		t.Fatal("wait timeout")
 	}
 
 	if operr, ok := err.(*net.OpError); !ok || operr.Op != "write" || !operr.Timeout() {
 		t.Errorf("err = %v, want write i/o timeout error", err)
 	}
-	writerStopCh <- struct{}{}
+	stop <- struct{}{}
 
-	readerStopCh := make(chan struct{}, 1)
-	go blocker(readerStopCh)
+	go blocker()
 
 	conn, err = wln.Accept()
 	if err != nil {
-		readerStopCh <- struct{}{}
+		stop <- struct{}{}
 		t.Fatalf("unexpected accept error: %v", err)
 	}
 	buf := make([]byte, 10)
@@ -107,12 +105,12 @@ func TestWriteReadTimeoutListener(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(wln.readTimeout * 10):
-		readerStopCh <- struct{}{}
+		stop <- struct{}{}
 		t.Fatal("wait timeout")
 	}
 
 	if operr, ok := err.(*net.OpError); !ok || operr.Op != "read" || !operr.Timeout() {
-		t.Errorf("err = %v, want read i/o timeout error", err)
+		t.Errorf("err = %v, want write i/o timeout error", err)
 	}
-	readerStopCh <- struct{}{}
+	stop <- struct{}{}
 }

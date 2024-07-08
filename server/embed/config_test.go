@@ -18,6 +18,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"net/url"
 	"os"
@@ -25,12 +26,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"sigs.k8s.io/yaml"
-
 	"go.etcd.io/etcd/client/pkg/v3/srv"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.etcd.io/etcd/client/pkg/v3/types"
+
+	"sigs.k8s.io/yaml"
 )
 
 func notFoundErr(service, domain string) error {
@@ -41,7 +41,7 @@ func notFoundErr(service, domain string) error {
 func TestConfigFileOtherFields(t *testing.T) {
 	ctls := securityConfig{TrustedCAFile: "cca", CertFile: "ccert", KeyFile: "ckey"}
 	// Note AllowedCN and AllowedHostname are mutually exclusive, this test is just to verify the fields can be correctly marshalled & unmarshalled.
-	ptls := securityConfig{TrustedCAFile: "pca", CertFile: "pcert", KeyFile: "pkey", AllowedCNs: []string{"etcd"}, AllowedHostnames: []string{"whatever.example.com"}}
+	ptls := securityConfig{TrustedCAFile: "pca", CertFile: "pcert", KeyFile: "pkey", AllowedCN: "etcd", AllowedHostname: "whatever.example.com"}
 	yc := struct {
 		ClientSecurityCfgFile securityConfig       `json:"client-transport-security"`
 		PeerSecurityCfgFile   securityConfig       `json:"peer-transport-security"`
@@ -153,138 +153,6 @@ func TestUpdateDefaultClusterFromNameOverwrite(t *testing.T) {
 	}
 }
 
-func TestInferLocalAddr(t *testing.T) {
-	tests := []struct {
-		name               string
-		advertisePeerURLs  []string
-		setMemberLocalAddr bool
-		expectedLocalAddr  string
-	}{
-		{
-			"defaults, ExperimentalSetMemberLocalAddr=false ",
-			[]string{DefaultInitialAdvertisePeerURLs},
-			false,
-			"",
-		},
-		{
-			"IPv4 address, ExperimentalSetMemberLocalAddr=false ",
-			[]string{"https://192.168.100.110:2380"},
-			false,
-			"",
-		},
-		{
-			"defaults, ExperimentalSetMemberLocalAddr=true",
-			[]string{DefaultInitialAdvertisePeerURLs},
-			true,
-			"",
-		},
-		{
-			"IPv4 unspecified address, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://0.0.0.0:2380"},
-			true,
-			"",
-		},
-		{
-			"IPv6 unspecified address, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://[::]:2380"},
-			true,
-			"",
-		},
-		{
-			"IPv4 loopback address, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://127.0.0.1:2380"},
-			true,
-			"",
-		},
-		{
-			"IPv6 loopback address, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://[::1]:2380"},
-			true,
-			"",
-		},
-		{
-			"IPv4 address, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://192.168.100.110:2380"},
-			true,
-			"192.168.100.110",
-		},
-		{
-			"Hostname only, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://123-host-3.corp.internal:2380"},
-			true,
-			"",
-		},
-		{
-			"Hostname and IPv4 address, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://123-host-3.corp.internal:2380", "https://192.168.100.110:2380"},
-			true,
-			"192.168.100.110",
-		},
-		{
-			"IPv4 address and Hostname, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://192.168.100.110:2380", "https://123-host-3.corp.internal:2380"},
-			true,
-			"192.168.100.110",
-		},
-		{
-			"IPv4 and IPv6 addresses, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://192.168.100.110:2380", "https://[2001:db8:85a3::8a2e:370:7334]:2380"},
-			true,
-			"192.168.100.110",
-		},
-		{
-			"IPv6 and IPv4 addresses, ExperimentalSetMemberLocalAddr=true",
-			// IPv4 addresses will always sort before IPv6 ones anyway
-			[]string{"https://[2001:db8:85a3::8a2e:370:7334]:2380", "https://192.168.100.110:2380"},
-			true,
-			"192.168.100.110",
-		},
-		{
-			"Hostname, IPv4 and IPv6 addresses, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://123-host-3.corp.internal:2380", "https://192.168.100.110:2380", "https://[2001:db8:85a3::8a2e:370:7334]:2380"},
-			true,
-			"192.168.100.110",
-		},
-		{
-			"Hostname, IPv6 and IPv4 addresses, ExperimentalSetMemberLocalAddr=true",
-			// IPv4 addresses will always sort before IPv6 ones anyway
-			[]string{"https://123-host-3.corp.internal:2380", "https://[2001:db8:85a3::8a2e:370:7334]:2380", "https://192.168.100.110:2380"},
-			true,
-			"192.168.100.110",
-		},
-		{
-			"IPv6 address, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://[2001:db8:85a3::8a2e:370:7334]:2380"},
-			true,
-			"2001:db8:85a3::8a2e:370:7334",
-		},
-		{
-			"Hostname and IPv6 address, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://123-host-3.corp.internal:2380", "https://[2001:db8:85a3::8a2e:370:7334]:2380"},
-			true,
-			"2001:db8:85a3::8a2e:370:7334",
-		},
-		{
-			"IPv6 address and Hostname, ExperimentalSetMemberLocalAddr=true",
-			[]string{"https://[2001:db8:85a3::8a2e:370:7334]:2380", "https://123-host-3.corp.internal:2380"},
-			true,
-			"2001:db8:85a3::8a2e:370:7334",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewConfig()
-			cfg.AdvertisePeerUrls = types.MustNewURLs(tt.advertisePeerURLs)
-			cfg.ExperimentalSetMemberLocalAddr = tt.setMemberLocalAddr
-
-			require.NoError(t, cfg.Validate())
-			require.Equal(t, tt.expectedLocalAddr, cfg.InferLocalAddr())
-		})
-	}
-
-}
-
 func (s *securityConfig) equals(t *transport.TLSInfo) bool {
 	return s.CertFile == t.CertFile &&
 		s.CertAuth == t.ClientCertAuth &&
@@ -292,24 +160,12 @@ func (s *securityConfig) equals(t *transport.TLSInfo) bool {
 		s.ClientCertFile == t.ClientCertFile &&
 		s.ClientKeyFile == t.ClientKeyFile &&
 		s.KeyFile == t.KeyFile &&
-		compareSlices(s.AllowedCNs, t.AllowedCNs) &&
-		compareSlices(s.AllowedHostnames, t.AllowedHostnames)
-}
-
-func compareSlices(slice1, slice2 []string) bool {
-	if len(slice1) != len(slice2) {
-		return false
-	}
-	for i, v := range slice1 {
-		if v != slice2[i] {
-			return false
-		}
-	}
-	return true
+		s.AllowedCN == t.AllowedCN &&
+		s.AllowedHostname == t.AllowedHostname
 }
 
 func mustCreateCfgFile(t *testing.T, b []byte) *os.File {
-	tmpfile, err := os.CreateTemp("", "servercfg")
+	tmpfile, err := ioutil.TempFile("", "servercfg")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,11 +208,6 @@ func TestAutoCompactionModeParse(t *testing.T) {
 		// err mode
 		{"errmode", "1", false, 0},
 		{"errmode", "1h", false, time.Hour},
-		// empty mode
-		{"", "1", true, 0},
-		{"", "1h", false, time.Hour},
-		{"", "a", true, 0},
-		{"", "-1", true, 0},
 	}
 
 	hasErr := func(err error) bool {
@@ -661,11 +512,4 @@ func TestTLSVersionMinMax(t *testing.T) {
 			assert.Equal(t, tt.expectedMaxTLSVersion, cfg.ClientTLSInfo.MaxVersion)
 		})
 	}
-}
-
-func TestUndefinedAutoCompactionModeValidate(t *testing.T) {
-	cfg := *NewConfig()
-	cfg.AutoCompactionMode = ""
-	err := cfg.Validate()
-	require.Error(t, err)
 }

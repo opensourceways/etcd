@@ -16,22 +16,21 @@ package v3rpc
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"math/rand"
 	"sync"
 	"time"
 
-	"go.uber.org/zap"
-
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	"go.etcd.io/etcd/client/pkg/v3/verify"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/auth"
 	"go.etcd.io/etcd/server/v3/etcdserver"
-	"go.etcd.io/etcd/server/v3/etcdserver/apply"
-	"go.etcd.io/etcd/server/v3/storage/mvcc"
+	"go.etcd.io/etcd/server/v3/mvcc"
+
+	"go.uber.org/zap"
 )
 
 const minWatchProgressInterval = 100 * time.Millisecond
@@ -44,7 +43,7 @@ type watchServer struct {
 
 	maxRequestBytes int
 
-	sg        apply.RaftStatusGetter
+	sg        etcdserver.RaftStatusGetter
 	watchable mvcc.WatchableKV
 	ag        AuthGetter
 }
@@ -55,7 +54,7 @@ func NewWatchServer(s *etcdserver.EtcdServer) pb.WatchServer {
 		lg: s.Cfg.Logger,
 
 		clusterID: int64(s.Cluster().ID()),
-		memberID:  int64(s.MemberID()),
+		memberID:  int64(s.ID()),
 
 		maxRequestBytes: int(s.Cfg.MaxRequestBytes + grpcOverheadBytes),
 
@@ -127,7 +126,7 @@ type serverWatchStream struct {
 
 	maxRequestBytes int
 
-	sg        apply.RaftStatusGetter
+	sg        etcdserver.RaftStatusGetter
 	watchable mvcc.WatchableKV
 	ag        AuthGetter
 
@@ -366,9 +365,8 @@ func (sws *serverWatchStream) recvLoop() error {
 			}
 		default:
 			// we probably should not shutdown the entire stream when
-			// receive an invalid command.
+			// receive an valid command.
 			// so just do nothing instead.
-			sws.lg.Sugar().Infof("invalid watch request type %T received in gRPC stream", uv)
 			continue
 		}
 	}
@@ -449,7 +447,6 @@ func (sws *serverWatchStream) sendLoop() {
 			sws.mu.RUnlock()
 
 			var serr error
-			// gofail: var beforeSendWatchResponse struct{}
 			if !fragmented && !ok {
 				serr = sws.gRPCStream.Send(wr)
 			} else {
@@ -491,7 +488,9 @@ func (sws *serverWatchStream) sendLoop() {
 			// track id creation
 			wid := mvcc.WatchID(c.WatchId)
 
-			verify.Assert(!(c.Canceled && c.Created) || wid == clientv3.InvalidWatchID, "unexpected watchId: %d, wanted: %d, since both 'Canceled' and 'Created' are true", wid, clientv3.InvalidWatchID)
+			if !(!(c.Canceled && c.Created) || wid == clientv3.InvalidWatchID) {
+				panic(fmt.Sprintf("unexpected watchId: %d, wanted: %d, since both 'Canceled' and 'Created' are true", wid, clientv3.InvalidWatchID))
+			}
 
 			if c.Canceled && wid != clientv3.InvalidWatchID {
 				delete(ids, wid)

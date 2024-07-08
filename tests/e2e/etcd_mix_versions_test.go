@@ -1,4 +1,4 @@
-// Copyright 2022 The etcd Authors
+// Copyright 2024 The etcd Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,49 +15,46 @@
 package e2e
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
-	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 )
 
 type clusterTestCase struct {
 	name   string
-	config *e2e.EtcdProcessClusterConfig
+	config e2e.EtcdProcessClusterConfig
 }
 
 func clusterTestCases(size int) []clusterTestCase {
 	tcs := []clusterTestCase{
 		{
 			name:   "CurrentVersion",
-			config: e2e.NewConfig(e2e.WithClusterSize(size)),
+			config: e2e.EtcdProcessClusterConfig{ClusterSize: size},
 		},
 	}
-	if !fileutil.Exist(e2e.BinPath.EtcdLastRelease) {
+	if !fileutil.Exist(e2e.BinPathLastRelease) {
 		return tcs
 	}
 
 	tcs = append(tcs,
 		clusterTestCase{
 			name:   "LastVersion",
-			config: e2e.NewConfig(e2e.WithClusterSize(size), e2e.WithVersion(e2e.LastVersion)),
+			config: e2e.EtcdProcessClusterConfig{ClusterSize: size, Version: e2e.LastVersion},
 		},
 	)
 	if size > 2 {
 		tcs = append(tcs,
 			clusterTestCase{
 				name:   "MinorityLastVersion",
-				config: e2e.NewConfig(e2e.WithClusterSize(size), e2e.WithVersion(e2e.MinorityLastVersion)),
+				config: e2e.EtcdProcessClusterConfig{ClusterSize: size, Version: e2e.MinorityLastVersion},
 			}, clusterTestCase{
 				name:   "QuorumLastVersion",
-				config: e2e.NewConfig(e2e.WithClusterSize(size), e2e.WithVersion(e2e.QuorumLastVersion)),
+				config: e2e.EtcdProcessClusterConfig{ClusterSize: size, Version: e2e.QuorumLastVersion},
 			},
 		)
 	}
@@ -70,29 +67,25 @@ func TestMixVersionsSnapshotByAddingMember(t *testing.T) {
 		t.Run(tc.name+"-adding-new-member-of-current-version", func(t *testing.T) {
 			mixVersionsSnapshotTestByAddingMember(t, tc.config, e2e.CurrentVersion)
 		})
-		// etcd doesn't support adding a new member of old version into
-		// a cluster with higher version. For example, etcd cluster
-		// version is 3.6.x, then a new member of 3.5.x can't join the
-		// cluster. Please refer to link below,
-		// https://github.com/etcd-io/etcd/blob/3e903d0b12e399519a4013c52d4635ec8bdd6863/server/etcdserver/cluster_util.go#L222-L230
-		/*t.Run(tc.name+"-adding-new-member-of-last-version", func(t *testing.T) {
-			mixVersionsSnapshotTestByAddingMember(t, tc.config, e2e.LastVersion)
-		})*/
+		if fileutil.Exist(e2e.BinPathLastRelease) {
+			t.Run(tc.name+"-adding-new-member-of-last-version", func(t *testing.T) {
+				mixVersionsSnapshotTestByAddingMember(t, tc.config, e2e.LastVersion)
+			})
+		}
 	}
 }
 
-func mixVersionsSnapshotTestByAddingMember(t *testing.T, cfg *e2e.EtcdProcessClusterConfig, newInstanceVersion e2e.ClusterVersion) {
+func mixVersionsSnapshotTestByAddingMember(t *testing.T, cfg e2e.EtcdProcessClusterConfig, newInstanceVersion e2e.ClusterVersion) {
 	e2e.BeforeTest(t)
 
-	if !fileutil.Exist(e2e.BinPath.EtcdLastRelease) {
-		t.Skipf("%q does not exist", e2e.BinPath.EtcdLastRelease)
-	}
+	t.Logf("Create an etcd cluster with %d member\n", cfg.ClusterSize)
+	cfg.SnapshotCount = 10
+	cfg.SnapshotCatchUpEntries = 10
+	cfg.BasePeerScheme = "unix" // to avoid port conflict
+	cfg.NextClusterVersionCompatible = true
 
-	t.Logf("Create an etcd cluster with %d member", cfg.ClusterSize)
-	epc, err := e2e.NewEtcdProcessCluster(context.TODO(), t,
-		e2e.WithConfig(cfg),
-		e2e.WithSnapshotCount(10),
-	)
+	epc, err := e2e.NewEtcdProcessCluster(t, &cfg)
+
 	require.NoError(t, err, "failed to start etcd cluster: %v", err)
 	defer func() {
 		derr := epc.Close()
@@ -100,18 +93,25 @@ func mixVersionsSnapshotTestByAddingMember(t *testing.T, cfg *e2e.EtcdProcessClu
 	}()
 
 	t.Log("Writing 20 keys to the cluster (more than SnapshotCount entries to trigger at least a snapshot)")
-	writeKVs(t, epc.Etcdctl(), 0, 20)
 
-	t.Log("start a new etcd instance, which will receive a snapshot from the leader.")
+	etcdctl := epc.Procs[0].Etcdctl(e2e.ClientNonTLS, false, false)
+	writeKVs(t, etcdctl, 0, 20)
+
+	t.Log("Start a new etcd instance, which will receive a snapshot from the leader.")
 	newCfg := *epc.Cfg
 	newCfg.Version = newInstanceVersion
-	newCfg.ServerConfig.SnapshotCatchUpEntries = 10
 	t.Log("Starting a new etcd instance")
-	_, err = epc.StartNewProc(context.TODO(), &newCfg, t, false /* addAsLearner */)
+	_, err = epc.StartNewProc(&newCfg, t)
 	require.NoError(t, err, "failed to start the new etcd instance: %v", err)
-	defer epc.CloseProc(context.TODO(), nil)
+	defer epc.Close()
 
 	assertKVHash(t, epc)
+
+	leaderEPC := epc.Procs[epc.WaitLeader(t)]
+	if leaderEPC.Config().ExecPath == e2e.BinPath {
+		t.Log("Verify logs to check snapshot be sent from leader to follower")
+		e2e.AssertProcessLogs(t, leaderEPC, "sent database snapshot")
+	}
 }
 
 func TestMixVersionsSnapshotByMockingPartition(t *testing.T) {
@@ -123,20 +123,20 @@ func TestMixVersionsSnapshotByMockingPartition(t *testing.T) {
 	}
 }
 
-func mixVersionsSnapshotTestByMockPartition(t *testing.T, cfg *e2e.EtcdProcessClusterConfig, mockPartitionNodeIndex int) {
+func mixVersionsSnapshotTestByMockPartition(t *testing.T, cfg e2e.EtcdProcessClusterConfig, mockPartitionNodeIndex int) {
 	e2e.BeforeTest(t)
 
-	if !fileutil.Exist(e2e.BinPath.EtcdLastRelease) {
-		t.Skipf("%q does not exist", e2e.BinPath.EtcdLastRelease)
+	if !fileutil.Exist(e2e.BinPathLastRelease) {
+		t.Skipf("%q does not exist", e2e.BinPathLastRelease)
 	}
 
-	clusterOptions := []e2e.EPClusterOption{
-		e2e.WithConfig(cfg),
-		e2e.WithSnapshotCount(10),
-		e2e.WithSnapshotCatchUpEntries(10),
-	}
-	t.Logf("Create an etcd cluster with %d member", cfg.ClusterSize)
-	epc, err := e2e.NewEtcdProcessCluster(context.TODO(), t, clusterOptions...)
+	t.Logf("Create an etcd cluster with %d member\n", cfg.ClusterSize)
+	cfg.SnapshotCount = 10
+	cfg.SnapshotCatchUpEntries = 10
+	cfg.BasePeerScheme = "unix" // to avoid port conflict
+	cfg.NextClusterVersionCompatible = true
+
+	epc, err := e2e.NewEtcdProcessCluster(t, &cfg)
 	require.NoError(t, err, "failed to start etcd cluster: %v", err)
 	defer func() {
 		derr := epc.Close()
@@ -147,30 +147,34 @@ func mixVersionsSnapshotTestByMockPartition(t *testing.T, cfg *e2e.EtcdProcessCl
 	t.Log("Stop and restart the partitioned member")
 	err = toPartitionedMember.Stop()
 	require.NoError(t, err)
+	time.Sleep(2 * time.Second)
 
 	t.Log("Writing 20 keys to the cluster (more than SnapshotCount entries to trigger at least a snapshot)")
-	writeKVs(t, epc.Etcdctl(), 0, 20)
+	etcdctl := epc.Procs[0].Etcdctl(e2e.ClientNonTLS, false, false)
+	writeKVs(t, etcdctl, 0, 20)
 
 	t.Log("Verify logs to check leader has saved snapshot")
 	leaderEPC := epc.Procs[epc.WaitLeader(t)]
 	e2e.AssertProcessLogs(t, leaderEPC, "saved snapshot")
 
 	t.Log("Restart the partitioned member")
-	err = toPartitionedMember.Restart(context.TODO())
+	err = toPartitionedMember.Restart()
 	require.NoError(t, err)
 
 	assertKVHash(t, epc)
 
 	leaderEPC = epc.Procs[epc.WaitLeader(t)]
-	t.Log("Verify logs to check snapshot be sent from leader to follower")
-	e2e.AssertProcessLogs(t, leaderEPC, "sent database snapshot")
+	if leaderEPC.Config().ExecPath == e2e.BinPath {
+		t.Log("Verify logs to check snapshot be sent from leader to follower")
+		e2e.AssertProcessLogs(t, leaderEPC, "sent database snapshot")
+	}
 }
 
-func writeKVs(t *testing.T, etcdctl *e2e.EtcdctlV3, startIdx, endIdx int) {
+func writeKVs(t *testing.T, etcdctl *e2e.Etcdctl, startIdx, endIdx int) {
 	for i := startIdx; i < endIdx; i++ {
 		key := fmt.Sprintf("key-%d", i)
 		value := fmt.Sprintf("value-%d", i)
-		err := etcdctl.Put(context.TODO(), key, value, config.PutOptions{})
+		err := etcdctl.Put(key, value)
 		require.NoError(t, err, "failed to put %q, error: %v", key, err)
 	}
 }
@@ -182,7 +186,7 @@ func assertKVHash(t *testing.T, epc *e2e.EtcdProcessCluster) {
 	}
 	t.Log("Verify all nodes have exact same revision and hash")
 	assert.Eventually(t, func() bool {
-		hashKvs, err := epc.Etcdctl().HashKV(context.TODO(), 0)
+		hashKvs, err := epc.Etcdctl().HashKV(0)
 		if err != nil {
 			t.Logf("failed to get HashKV: %v", err)
 			return false

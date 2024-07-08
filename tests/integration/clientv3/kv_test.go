@@ -25,25 +25,24 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/api/v3/version"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
+	"go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/tests/v3/integration"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestKVPutError(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
 	var (
 		maxReqBytes = 1.5 * 1024 * 1024                                // hard coded max in v3_server.go
 		quota       = int64(int(maxReqBytes*1.2) + 8*os.Getpagesize()) // make sure we have enough overhead in backend quota. See discussion in #6486.
 	)
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1, QuotaBackendBytes: quota, ClientMaxCallSendMsgSize: 100 * 1024 * 1024})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1, QuotaBackendBytes: quota, ClientMaxCallSendMsgSize: 100 * 1024 * 1024})
 	defer clus.Terminate(t)
 
 	kv := clus.RandClient()
@@ -72,10 +71,10 @@ func TestKVPutError(t *testing.T) {
 	}
 }
 
-func TestKVPutWithLease(t *testing.T) {
-	integration2.BeforeTest(t)
+func TestKVPut(t *testing.T) {
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	lapi := clus.RandClient()
@@ -83,36 +82,44 @@ func TestKVPutWithLease(t *testing.T) {
 	kv := clus.RandClient()
 	ctx := context.TODO()
 
-	lease, err := lapi.Grant(context.Background(), 10)
+	resp, err := lapi.Grant(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("failed to create lease %v", err)
 	}
 
-	key := "hello"
-	val := "world"
-	if _, err = kv.Put(ctx, key, val, clientv3.WithLease(lease.ID)); err != nil {
-		t.Fatalf("couldn't put %q (%v)", key, err)
+	tests := []struct {
+		key, val string
+		leaseID  clientv3.LeaseID
+	}{
+		{"foo", "bar", clientv3.NoLease},
+		{"hello", "world", resp.ID},
 	}
-	resp, err := kv.Get(ctx, key)
-	if err != nil {
-		t.Fatalf("couldn't get key (%v)", err)
-	}
-	if len(resp.Kvs) != 1 {
-		t.Fatalf("expected 1 key, got %d", len(resp.Kvs))
-	}
-	if !bytes.Equal([]byte(val), resp.Kvs[0].Value) {
-		t.Errorf("val = %s, want %s", val, resp.Kvs[0].Value)
-	}
-	if lease.ID != clientv3.LeaseID(resp.Kvs[0].Lease) {
-		t.Errorf("val = %d, want %d", lease.ID, resp.Kvs[0].Lease)
+
+	for i, tt := range tests {
+		if _, err := kv.Put(ctx, tt.key, tt.val, clientv3.WithLease(tt.leaseID)); err != nil {
+			t.Fatalf("#%d: couldn't put %q (%v)", i, tt.key, err)
+		}
+		resp, err := kv.Get(ctx, tt.key)
+		if err != nil {
+			t.Fatalf("#%d: couldn't get key (%v)", i, err)
+		}
+		if len(resp.Kvs) != 1 {
+			t.Fatalf("#%d: expected 1 key, got %d", i, len(resp.Kvs))
+		}
+		if !bytes.Equal([]byte(tt.val), resp.Kvs[0].Value) {
+			t.Errorf("#%d: val = %s, want %s", i, tt.val, resp.Kvs[0].Value)
+		}
+		if tt.leaseID != clientv3.LeaseID(resp.Kvs[0].Lease) {
+			t.Errorf("#%d: val = %d, want %d", i, tt.leaseID, resp.Kvs[0].Lease)
+		}
 	}
 }
 
 // TestKVPutWithIgnoreValue ensures that Put with WithIgnoreValue does not clobber the old value.
 func TestKVPutWithIgnoreValue(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	kv := clus.RandClient()
@@ -143,9 +150,9 @@ func TestKVPutWithIgnoreValue(t *testing.T) {
 
 // TestKVPutWithIgnoreLease ensures that Put with WithIgnoreLease does not affect the existing lease for the key.
 func TestKVPutWithIgnoreLease(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	kv := clus.RandClient()
@@ -182,9 +189,9 @@ func TestKVPutWithIgnoreLease(t *testing.T) {
 }
 
 func TestKVPutWithRequireLeader(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	clus.Members[1].Stop(t)
@@ -228,9 +235,9 @@ func TestKVPutWithRequireLeader(t *testing.T) {
 }
 
 func TestKVRange(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	kv := clus.RandClient()
@@ -255,9 +262,177 @@ func TestKVRange(t *testing.T) {
 
 		wantSet []*mvccpb.KeyValue
 	}{
+		// range first two
+		{
+			"a", "c",
+			0,
+			nil,
+
+			[]*mvccpb.KeyValue{
+				{Key: []byte("a"), Value: nil, CreateRevision: 2, ModRevision: 2, Version: 1},
+				{Key: []byte("b"), Value: nil, CreateRevision: 3, ModRevision: 3, Version: 1},
+			},
+		},
+		// range first two with serializable
+		{
+			"a", "c",
+			0,
+			[]clientv3.OpOption{clientv3.WithSerializable()},
+
+			[]*mvccpb.KeyValue{
+				{Key: []byte("a"), Value: nil, CreateRevision: 2, ModRevision: 2, Version: 1},
+				{Key: []byte("b"), Value: nil, CreateRevision: 3, ModRevision: 3, Version: 1},
+			},
+		},
+		// range all with rev
+		{
+			"a", "x",
+			2,
+			nil,
+
+			[]*mvccpb.KeyValue{
+				{Key: []byte("a"), Value: nil, CreateRevision: 2, ModRevision: 2, Version: 1},
+			},
+		},
+		// range all with countOnly
+		{
+			"a", "x",
+			2,
+			[]clientv3.OpOption{clientv3.WithCountOnly()},
+
+			nil,
+		},
+		// range all with SortByKey, SortAscend
+		{
+			"a", "x",
+			0,
+			[]clientv3.OpOption{clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend)},
+
+			[]*mvccpb.KeyValue{
+				{Key: []byte("a"), Value: nil, CreateRevision: 2, ModRevision: 2, Version: 1},
+				{Key: []byte("b"), Value: nil, CreateRevision: 3, ModRevision: 3, Version: 1},
+				{Key: []byte("c"), Value: nil, CreateRevision: 4, ModRevision: 6, Version: 3},
+				{Key: []byte("foo"), Value: nil, CreateRevision: 7, ModRevision: 7, Version: 1},
+				{Key: []byte("foo/abc"), Value: nil, CreateRevision: 8, ModRevision: 8, Version: 1},
+				{Key: []byte("fop"), Value: nil, CreateRevision: 9, ModRevision: 9, Version: 1},
+			},
+		},
+		// range all with SortByKey, missing sorting order (ASCEND by default)
+		{
+			"a", "x",
+			0,
+			[]clientv3.OpOption{clientv3.WithSort(clientv3.SortByKey, clientv3.SortNone)},
+
+			[]*mvccpb.KeyValue{
+				{Key: []byte("a"), Value: nil, CreateRevision: 2, ModRevision: 2, Version: 1},
+				{Key: []byte("b"), Value: nil, CreateRevision: 3, ModRevision: 3, Version: 1},
+				{Key: []byte("c"), Value: nil, CreateRevision: 4, ModRevision: 6, Version: 3},
+				{Key: []byte("foo"), Value: nil, CreateRevision: 7, ModRevision: 7, Version: 1},
+				{Key: []byte("foo/abc"), Value: nil, CreateRevision: 8, ModRevision: 8, Version: 1},
+				{Key: []byte("fop"), Value: nil, CreateRevision: 9, ModRevision: 9, Version: 1},
+			},
+		},
+		// range all with SortByCreateRevision, SortDescend
+		{
+			"a", "x",
+			0,
+			[]clientv3.OpOption{clientv3.WithSort(clientv3.SortByCreateRevision, clientv3.SortDescend)},
+
+			[]*mvccpb.KeyValue{
+				{Key: []byte("fop"), Value: nil, CreateRevision: 9, ModRevision: 9, Version: 1},
+				{Key: []byte("foo/abc"), Value: nil, CreateRevision: 8, ModRevision: 8, Version: 1},
+				{Key: []byte("foo"), Value: nil, CreateRevision: 7, ModRevision: 7, Version: 1},
+				{Key: []byte("c"), Value: nil, CreateRevision: 4, ModRevision: 6, Version: 3},
+				{Key: []byte("b"), Value: nil, CreateRevision: 3, ModRevision: 3, Version: 1},
+				{Key: []byte("a"), Value: nil, CreateRevision: 2, ModRevision: 2, Version: 1},
+			},
+		},
+		// range all with SortByCreateRevision, missing sorting order (ASCEND by default)
+		{
+			"a", "x",
+			0,
+			[]clientv3.OpOption{clientv3.WithSort(clientv3.SortByCreateRevision, clientv3.SortNone)},
+
+			[]*mvccpb.KeyValue{
+				{Key: []byte("a"), Value: nil, CreateRevision: 2, ModRevision: 2, Version: 1},
+				{Key: []byte("b"), Value: nil, CreateRevision: 3, ModRevision: 3, Version: 1},
+				{Key: []byte("c"), Value: nil, CreateRevision: 4, ModRevision: 6, Version: 3},
+				{Key: []byte("foo"), Value: nil, CreateRevision: 7, ModRevision: 7, Version: 1},
+				{Key: []byte("foo/abc"), Value: nil, CreateRevision: 8, ModRevision: 8, Version: 1},
+				{Key: []byte("fop"), Value: nil, CreateRevision: 9, ModRevision: 9, Version: 1},
+			},
+		},
+		// range all with SortByModRevision, SortDescend
+		{
+			"a", "x",
+			0,
+			[]clientv3.OpOption{clientv3.WithSort(clientv3.SortByModRevision, clientv3.SortDescend)},
+
+			[]*mvccpb.KeyValue{
+				{Key: []byte("fop"), Value: nil, CreateRevision: 9, ModRevision: 9, Version: 1},
+				{Key: []byte("foo/abc"), Value: nil, CreateRevision: 8, ModRevision: 8, Version: 1},
+				{Key: []byte("foo"), Value: nil, CreateRevision: 7, ModRevision: 7, Version: 1},
+				{Key: []byte("c"), Value: nil, CreateRevision: 4, ModRevision: 6, Version: 3},
+				{Key: []byte("b"), Value: nil, CreateRevision: 3, ModRevision: 3, Version: 1},
+				{Key: []byte("a"), Value: nil, CreateRevision: 2, ModRevision: 2, Version: 1},
+			},
+		},
+		// WithPrefix
+		{
+			"foo", "",
+			0,
+			[]clientv3.OpOption{clientv3.WithPrefix()},
+
+			[]*mvccpb.KeyValue{
+				{Key: []byte("foo"), Value: nil, CreateRevision: 7, ModRevision: 7, Version: 1},
+				{Key: []byte("foo/abc"), Value: nil, CreateRevision: 8, ModRevision: 8, Version: 1},
+			},
+		},
+		// WithFromKey
+		{
+			"fo", "",
+			0,
+			[]clientv3.OpOption{clientv3.WithFromKey()},
+
+			[]*mvccpb.KeyValue{
+				{Key: []byte("foo"), Value: nil, CreateRevision: 7, ModRevision: 7, Version: 1},
+				{Key: []byte("foo/abc"), Value: nil, CreateRevision: 8, ModRevision: 8, Version: 1},
+				{Key: []byte("fop"), Value: nil, CreateRevision: 9, ModRevision: 9, Version: 1},
+			},
+		},
 		// fetch entire keyspace using WithFromKey
 		{
 			"\x00", "",
+			0,
+			[]clientv3.OpOption{clientv3.WithFromKey(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend)},
+
+			[]*mvccpb.KeyValue{
+				{Key: []byte("a"), Value: nil, CreateRevision: 2, ModRevision: 2, Version: 1},
+				{Key: []byte("b"), Value: nil, CreateRevision: 3, ModRevision: 3, Version: 1},
+				{Key: []byte("c"), Value: nil, CreateRevision: 4, ModRevision: 6, Version: 3},
+				{Key: []byte("foo"), Value: nil, CreateRevision: 7, ModRevision: 7, Version: 1},
+				{Key: []byte("foo/abc"), Value: nil, CreateRevision: 8, ModRevision: 8, Version: 1},
+				{Key: []byte("fop"), Value: nil, CreateRevision: 9, ModRevision: 9, Version: 1},
+			},
+		},
+		// fetch entire keyspace using WithPrefix
+		{
+			"", "",
+			0,
+			[]clientv3.OpOption{clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend)},
+
+			[]*mvccpb.KeyValue{
+				{Key: []byte("a"), Value: nil, CreateRevision: 2, ModRevision: 2, Version: 1},
+				{Key: []byte("b"), Value: nil, CreateRevision: 3, ModRevision: 3, Version: 1},
+				{Key: []byte("c"), Value: nil, CreateRevision: 4, ModRevision: 6, Version: 3},
+				{Key: []byte("foo"), Value: nil, CreateRevision: 7, ModRevision: 7, Version: 1},
+				{Key: []byte("foo/abc"), Value: nil, CreateRevision: 8, ModRevision: 8, Version: 1},
+				{Key: []byte("fop"), Value: nil, CreateRevision: 9, ModRevision: 9, Version: 1},
+			},
+		},
+		// fetch keyspace with empty key using WithFromKey
+		{
+			"", "",
 			0,
 			[]clientv3.OpOption{clientv3.WithFromKey(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend)},
 
@@ -289,9 +464,9 @@ func TestKVRange(t *testing.T) {
 }
 
 func TestKVGetErrConnClosed(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	cli := clus.Client(0)
@@ -311,16 +486,16 @@ func TestKVGetErrConnClosed(t *testing.T) {
 	}()
 
 	select {
-	case <-time.After(integration2.RequestWaitTimeout):
+	case <-time.After(integration.RequestWaitTimeout):
 		t.Fatal("kv.Get took too long")
 	case <-donec:
 	}
 }
 
 func TestKVNewAfterClose(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	cli := clus.Client(0)
@@ -338,31 +513,54 @@ func TestKVNewAfterClose(t *testing.T) {
 		close(donec)
 	}()
 	select {
-	case <-time.After(integration2.RequestWaitTimeout):
+	case <-time.After(integration.RequestWaitTimeout):
 		t.Fatal("kv.Get took too long")
 	case <-donec:
 	}
 }
 
 func TestKVDeleteRange(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	kv := clus.RandClient()
 	ctx := context.TODO()
 
 	tests := []struct {
-		key   string
-		opts  []clientv3.OpOption
+		key  string
+		opts []clientv3.OpOption
+
 		wkeys []string
 	}{
+		// [a, c)
+		{
+			key:  "a",
+			opts: []clientv3.OpOption{clientv3.WithRange("c")},
+
+			wkeys: []string{"c", "c/abc", "d"},
+		},
+		// >= c
+		{
+			key:  "c",
+			opts: []clientv3.OpOption{clientv3.WithFromKey()},
+
+			wkeys: []string{"a", "b"},
+		},
+		// c*
+		{
+			key:  "c",
+			opts: []clientv3.OpOption{clientv3.WithPrefix()},
+
+			wkeys: []string{"a", "b", "d"},
+		},
 		// *
 		{
-			key:   "\x00",
-			opts:  []clientv3.OpOption{clientv3.WithFromKey()},
-			wkeys: nil,
+			key:  "\x00",
+			opts: []clientv3.OpOption{clientv3.WithFromKey()},
+
+			wkeys: []string{},
 		},
 	}
 
@@ -383,7 +581,7 @@ func TestKVDeleteRange(t *testing.T) {
 		if err != nil {
 			t.Fatalf("#%d: couldn't get keys (%v)", i, err)
 		}
-		var keys []string
+		keys := []string{}
 		for _, kv := range resp.Kvs {
 			keys = append(keys, string(kv.Key))
 		}
@@ -393,10 +591,42 @@ func TestKVDeleteRange(t *testing.T) {
 	}
 }
 
-func TestKVCompactError(t *testing.T) {
-	integration2.BeforeTest(t)
+func TestKVDelete(t *testing.T) {
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
+	defer clus.Terminate(t)
+
+	kv := clus.RandClient()
+	ctx := context.TODO()
+
+	presp, err := kv.Put(ctx, "foo", "")
+	if err != nil {
+		t.Fatalf("couldn't put 'foo' (%v)", err)
+	}
+	if presp.Header.Revision != 2 {
+		t.Fatalf("presp.Header.Revision got %d, want %d", presp.Header.Revision, 2)
+	}
+	resp, err := kv.Delete(ctx, "foo")
+	if err != nil {
+		t.Fatalf("couldn't delete key (%v)", err)
+	}
+	if resp.Header.Revision != 3 {
+		t.Fatalf("resp.Header.Revision got %d, want %d", resp.Header.Revision, 3)
+	}
+	gresp, err := kv.Get(ctx, "foo")
+	if err != nil {
+		t.Fatalf("couldn't get key (%v)", err)
+	}
+	if len(gresp.Kvs) > 0 {
+		t.Fatalf("gresp.Kvs got %+v, want none", gresp.Kvs)
+	}
+}
+
+func TestKVCompactError(t *testing.T) {
+	integration.BeforeTest(t)
+
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	kv := clus.RandClient()
@@ -424,9 +654,9 @@ func TestKVCompactError(t *testing.T) {
 }
 
 func TestKVCompact(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	kv := clus.RandClient()
@@ -479,10 +709,10 @@ func TestKVCompact(t *testing.T) {
 
 // TestKVGetRetry ensures get will retry on disconnect.
 func TestKVGetRetry(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
 	clusterSize := 3
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: clusterSize, UseBridge: true})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: clusterSize, UseBridge: true})
 	defer clus.Terminate(t)
 
 	// because killing leader and following election
@@ -533,9 +763,9 @@ func TestKVGetRetry(t *testing.T) {
 
 // TestKVPutFailGetRetry ensures a get will retry following a failed put.
 func TestKVPutFailGetRetry(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3, UseBridge: true})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3, UseBridge: true})
 	defer clus.Terminate(t)
 
 	kv := clus.Client(0)
@@ -573,9 +803,9 @@ func TestKVPutFailGetRetry(t *testing.T) {
 
 // TestKVGetCancel tests that a context cancel on a Get terminates as expected.
 func TestKVGetCancel(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	oldconn := clus.Client(0).ActiveConnection()
@@ -596,9 +826,9 @@ func TestKVGetCancel(t *testing.T) {
 
 // TestKVGetStoppedServerAndClose ensures closing after a failed Get works.
 func TestKVGetStoppedServerAndClose(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	cli := clus.Client(0)
@@ -614,9 +844,9 @@ func TestKVGetStoppedServerAndClose(t *testing.T) {
 
 // TestKVPutStoppedServerAndClose ensures closing after a failed Put works.
 func TestKVPutStoppedServerAndClose(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	cli := clus.Client(0)
@@ -645,8 +875,8 @@ func TestKVPutStoppedServerAndClose(t *testing.T) {
 // TestKVPutAtMostOnce ensures that a Put will only occur at most once
 // in the presence of network errors.
 func TestKVPutAtMostOnce(t *testing.T) {
-	integration2.BeforeTest(t)
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1, UseBridge: true})
+	integration.BeforeTest(t)
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1, UseBridge: true})
 	defer clus.Terminate(t)
 
 	if _, err := clus.Client(0).Put(context.TODO(), "k", "1"); err != nil {
@@ -681,7 +911,7 @@ func TestKVPutAtMostOnce(t *testing.T) {
 
 // TestKVLargeRequests tests various client/server side request limits.
 func TestKVLargeRequests(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 	tests := []struct {
 		// make sure that "MaxCallSendMsgSize" < server-side default send/recv limit
 		maxRequestBytesServer  uint
@@ -702,12 +932,14 @@ func TestKVLargeRequests(t *testing.T) {
 		// without proper client-side receive size limit
 		// "code = ResourceExhausted desc = grpc: received message larger than max (5242929 vs. 4194304)"
 		{
+
 			maxRequestBytesServer:  7*1024*1024 + 512*1024,
 			maxCallSendBytesClient: 7 * 1024 * 1024,
 			maxCallRecvBytesClient: 0,
 			valueSize:              5 * 1024 * 1024,
 			expectError:            nil,
 		},
+
 		{
 			maxRequestBytesServer:  10 * 1024 * 1024,
 			maxCallSendBytesClient: 100 * 1024 * 1024,
@@ -738,8 +970,8 @@ func TestKVLargeRequests(t *testing.T) {
 		},
 	}
 	for i, test := range tests {
-		clus := integration2.NewCluster(t,
-			&integration2.ClusterConfig{
+		clus := integration.NewClusterV3(t,
+			&integration.ClusterConfig{
 				Size:                     1,
 				MaxRequestBytes:          test.maxRequestBytesServer,
 				ClientMaxCallSendMsgSize: test.maxCallSendBytesClient,
@@ -771,9 +1003,9 @@ func TestKVLargeRequests(t *testing.T) {
 
 // TestKVForLearner ensures learner member only accepts serializable read request.
 func TestKVForLearner(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3, DisableStrictReconfigCheck: true})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	// we have to add and launch learner member after initial cluster was created, because
@@ -795,14 +1027,14 @@ func TestKVForLearner(t *testing.T) {
 	// 1. clus.Members[3] is the newly added learner member, which was appended to clus.Members
 	// 2. we are using member's grpcAddr instead of clientURLs as the endpoint for clientv3.Config,
 	// because the implementation of integration test has diverged from embed/etcd.go.
-	learnerEp := clus.Members[3].GRPCURL
+	learnerEp := clus.Members[3].GRPCURL()
 	cfg := clientv3.Config{
 		Endpoints:   []string{learnerEp},
 		DialTimeout: 5 * time.Second,
 		DialOptions: []grpc.DialOption{grpc.WithBlock()},
 	}
 	// this client only has endpoint of the learner member
-	cli, err := integration2.NewClient(t, cfg)
+	cli, err := integration.NewClient(t, cfg)
 	if err != nil {
 		t.Fatalf("failed to create clientv3: %v", err)
 	}
@@ -850,9 +1082,9 @@ func TestKVForLearner(t *testing.T) {
 
 // TestBalancerSupportLearner verifies that balancer's retry and failover mechanism supports cluster with learner member
 func TestBalancerSupportLearner(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3, DisableStrictReconfigCheck: true})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	// we have to add and launch learner member after initial cluster was created, because
@@ -868,13 +1100,13 @@ func TestBalancerSupportLearner(t *testing.T) {
 	}
 
 	// clus.Members[3] is the newly added learner member, which was appended to clus.Members
-	learnerEp := clus.Members[3].GRPCURL
+	learnerEp := clus.Members[3].GRPCURL()
 	cfg := clientv3.Config{
 		Endpoints:   []string{learnerEp},
 		DialTimeout: 5 * time.Second,
 		DialOptions: []grpc.DialOption{grpc.WithBlock()},
 	}
-	cli, err := integration2.NewClient(t, cfg)
+	cli, err := integration.NewClient(t, cfg)
 	if err != nil {
 		t.Fatalf("failed to create clientv3: %v", err)
 	}
@@ -883,12 +1115,11 @@ func TestBalancerSupportLearner(t *testing.T) {
 	// wait until learner member is ready
 	<-clus.Members[3].ReadyNotify()
 
-	if _, err = cli.Get(context.Background(), "foo"); err == nil {
+	if _, err := cli.Get(context.Background(), "foo"); err == nil {
 		t.Fatalf("expect Get request to learner to fail, got no error")
 	}
-	t.Logf("Expected: Read from learner error: %v", err)
 
-	eps := []string{learnerEp, clus.Members[0].GRPCURL}
+	eps := []string{learnerEp, clus.Members[0].GRPCURL()}
 	cli.SetEndpoints(eps...)
 	if _, err := cli.Get(context.Background(), "foo"); err != nil {
 		t.Errorf("expect no error (balancer should retry when request to learner fails), got error: %v", err)

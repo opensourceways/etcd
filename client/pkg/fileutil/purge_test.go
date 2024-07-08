@@ -16,23 +16,28 @@ package fileutil
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
-	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap"
 )
 
 func TestPurgeFile(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := ioutil.TempDir("", "purgefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
 
 	// minimal file set
 	for i := 0; i < 3; i++ {
 		f, ferr := os.Create(filepath.Join(dir, fmt.Sprintf("%d.test", i)))
 		if ferr != nil {
-			t.Fatal(ferr)
+			t.Fatal(err)
 		}
 		f.Close()
 	}
@@ -40,7 +45,7 @@ func TestPurgeFile(t *testing.T) {
 	stop, purgec := make(chan struct{}), make(chan string, 10)
 
 	// keep 3 most recent files
-	errch := purgeFile(zaptest.NewLogger(t), dir, "test", 3, time.Millisecond, stop, purgec, nil, false)
+	errch := purgeFile(zap.NewExample(), dir, "test", 3, time.Millisecond, stop, purgec, nil, false)
 	select {
 	case f := <-purgec:
 		t.Errorf("unexpected purge on %q", f)
@@ -52,7 +57,7 @@ func TestPurgeFile(t *testing.T) {
 		go func(n int) {
 			f, ferr := os.Create(filepath.Join(dir, fmt.Sprintf("%d.test", n)))
 			if ferr != nil {
-				t.Error(ferr)
+				t.Error(err)
 			}
 			f.Close()
 		}(i)
@@ -88,11 +93,15 @@ func TestPurgeFile(t *testing.T) {
 }
 
 func TestPurgeFileHoldingLockFile(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := ioutil.TempDir("", "purgefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
 
 	for i := 0; i < 10; i++ {
 		var f *os.File
-		f, err := os.Create(filepath.Join(dir, fmt.Sprintf("%d.test", i)))
+		f, err = os.Create(filepath.Join(dir, fmt.Sprintf("%d.test", i)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -107,7 +116,7 @@ func TestPurgeFileHoldingLockFile(t *testing.T) {
 	}
 
 	stop, purgec := make(chan struct{}), make(chan string, 10)
-	errch := purgeFile(zaptest.NewLogger(t), dir, "test", 3, time.Millisecond, stop, purgec, nil, true)
+	errch := purgeFile(zap.NewExample(), dir, "test", 3, time.Millisecond, stop, purgec, nil, true)
 
 	for i := 0; i < 5; i++ {
 		select {

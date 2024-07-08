@@ -31,9 +31,7 @@ import (
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/server/v3/storage/mvcc/testutil"
-	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
-	"go.etcd.io/etcd/tests/v3/framework/testutils"
 )
 
 const (
@@ -54,14 +52,14 @@ func TestHTTPHealthHandler(t *testing.T) {
 	e2e.BeforeTest(t)
 	client := &http.Client{}
 	tcs := []struct {
-		name           string
-		injectFailure  injectFailure
-		clusterOptions []e2e.EPClusterOption
-		healthChecks   []healthCheckConfig
+		name          string
+		injectFailure injectFailure
+		clusterConfig e2e.EtcdProcessClusterConfig
+		healthChecks  []healthCheckConfig
 	}{
 		{
-			name:           "no failures", // happy case
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(1)},
+			name:          "no failures", // happy case
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 1},
 			healthChecks: []healthCheckConfig{
 				{
 					url:                "/health",
@@ -70,9 +68,9 @@ func TestHTTPHealthHandler(t *testing.T) {
 			},
 		},
 		{
-			name:           "activated no space alarm",
-			injectFailure:  triggerNoSpaceAlarm,
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(1), e2e.WithQuotaBackendBytes(int64(13 * os.Getpagesize()))},
+			name:          "activated no space alarm",
+			injectFailure: triggerNoSpaceAlarm,
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 1, QuotaBackendBytes: int64(13 * os.Getpagesize())},
 			healthChecks: []healthCheckConfig{
 				{
 					url:                "/health",
@@ -85,9 +83,9 @@ func TestHTTPHealthHandler(t *testing.T) {
 			},
 		},
 		{
-			name:           "overloaded server slow apply",
-			injectFailure:  triggerSlowApply,
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(3), e2e.WithGoFailEnabled(true)},
+			name:          "overloaded server slow apply",
+			injectFailure: triggerSlowApply,
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 3, GoFailEnabled: true},
 			healthChecks: []healthCheckConfig{
 				{
 					url:                "/health?serializable=true",
@@ -100,9 +98,9 @@ func TestHTTPHealthHandler(t *testing.T) {
 			},
 		},
 		{
-			name:           "network partitioned",
-			injectFailure:  blackhole,
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(3), e2e.WithIsPeerTLS(true), e2e.WithPeerProxy(true)},
+			name:          "network partitioned",
+			injectFailure: blackhole,
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 3, IsPeerTLS: true, PeerProxy: true},
 			healthChecks: []healthCheckConfig{
 				{
 					url:                "/health?serializable=true",
@@ -117,9 +115,9 @@ func TestHTTPHealthHandler(t *testing.T) {
 			},
 		},
 		{
-			name:           "raft loop deadlock",
-			injectFailure:  triggerRaftLoopDeadLock,
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(1), e2e.WithGoFailEnabled(true)},
+			name:          "raft loop deadlock",
+			injectFailure: triggerRaftLoopDeadLock,
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 1, GoFailEnabled: true},
 			healthChecks: []healthCheckConfig{
 				{
 					// current kubeadm etcd liveness check failed to detect raft loop deadlock in steady state
@@ -136,9 +134,9 @@ func TestHTTPHealthHandler(t *testing.T) {
 		},
 		// verify that auth enabled serializable read must go through mvcc
 		{
-			name:           "slow buffer write back with auth enabled",
-			injectFailure:  triggerSlowBufferWriteBackWithAuth,
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(1), e2e.WithGoFailEnabled(true)},
+			name:          "slow buffer write back with auth enabled",
+			injectFailure: triggerSlowBufferWriteBackWithAuth,
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 1, GoFailEnabled: true},
 			healthChecks: []healthCheckConfig{
 				{
 					url:                  "/health?serializable=true",
@@ -152,13 +150,13 @@ func TestHTTPHealthHandler(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			clus, err := e2e.NewEtcdProcessCluster(ctx, t, tc.clusterOptions...)
+			clus, err := e2e.NewEtcdProcessCluster(t, &tc.clusterConfig)
 			require.NoError(t, err)
 			defer clus.Close()
-			testutils.ExecuteUntil(ctx, t, func() {
+			e2e.ExecuteUntil(ctx, t, func() {
 				if tc.injectFailure != nil {
 					// guaranteed that failure point is active until all the health checks timeout.
-					duration := time.Duration(len(tc.healthChecks)+1) * healthCheckTimeout
+					duration := time.Duration(len(tc.healthChecks)+10) * healthCheckTimeout
 					tc.injectFailure(ctx, t, clus, duration)
 				}
 
@@ -204,28 +202,28 @@ func TestHTTPLivezReadyzHandler(t *testing.T) {
 	e2e.BeforeTest(t)
 	client := &http.Client{}
 	tcs := []struct {
-		name           string
-		injectFailure  injectFailure
-		clusterOptions []e2e.EPClusterOption
-		healthChecks   []healthCheckConfig
+		name          string
+		injectFailure injectFailure
+		clusterConfig e2e.EtcdProcessClusterConfig
+		healthChecks  []healthCheckConfig
 	}{
 		{
-			name:           "no failures", // happy case
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(1)},
-			healthChecks:   defaultHealthCheckConfigs,
+			name:          "no failures", // happy case
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 1},
+			healthChecks:  defaultHealthCheckConfigs,
 		},
 		{
-			name:           "activated no space alarm",
-			injectFailure:  triggerNoSpaceAlarm,
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(1), e2e.WithQuotaBackendBytes(int64(13 * os.Getpagesize()))},
-			healthChecks:   defaultHealthCheckConfigs,
+			name:          "activated no space alarm",
+			injectFailure: triggerNoSpaceAlarm,
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 1, QuotaBackendBytes: int64(13 * os.Getpagesize())},
+			healthChecks:  defaultHealthCheckConfigs,
 		},
 		// Readiness is not an indicator of performance. Slow response is not covered by readiness.
 		// refer to https://tinyurl.com/livez-readyz-design-doc or https://github.com/etcd-io/etcd/issues/16007#issuecomment-1726541091 in case tinyurl is down.
 		{
-			name:           "overloaded server slow apply",
-			injectFailure:  triggerSlowApply,
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(3), e2e.WithGoFailEnabled(true)},
+			name:          "overloaded server slow apply",
+			injectFailure: triggerSlowApply,
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 3, GoFailEnabled: true},
 			// TODO expected behavior of readyz check should be 200 after ReadIndex check is implemented to replace linearizable read.
 			healthChecks: []healthCheckConfig{
 				{
@@ -240,9 +238,9 @@ func TestHTTPLivezReadyzHandler(t *testing.T) {
 			},
 		},
 		{
-			name:           "network partitioned",
-			injectFailure:  blackhole,
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(3), e2e.WithIsPeerTLS(true), e2e.WithPeerProxy(true)},
+			name:          "network partitioned",
+			injectFailure: blackhole,
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 3, IsPeerTLS: true, PeerProxy: true},
 			healthChecks: []healthCheckConfig{
 				{
 					url:                "/livez",
@@ -259,9 +257,9 @@ func TestHTTPLivezReadyzHandler(t *testing.T) {
 			},
 		},
 		{
-			name:           "raft loop deadlock",
-			injectFailure:  triggerRaftLoopDeadLock,
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(1), e2e.WithGoFailEnabled(true)},
+			name:          "raft loop deadlock",
+			injectFailure: triggerRaftLoopDeadLock,
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 1, GoFailEnabled: true},
 			// TODO expected behavior of livez check should be 503 or timeout after RaftLoopDeadLock check is implemented.
 			healthChecks: []healthCheckConfig{
 				{
@@ -277,9 +275,9 @@ func TestHTTPLivezReadyzHandler(t *testing.T) {
 		},
 		// verify that auth enabled serializable read must go through mvcc
 		{
-			name:           "slow buffer write back with auth enabled",
-			injectFailure:  triggerSlowBufferWriteBackWithAuth,
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(1), e2e.WithGoFailEnabled(true)},
+			name:          "slow buffer write back with auth enabled",
+			injectFailure: triggerSlowBufferWriteBackWithAuth,
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 1, GoFailEnabled: true},
 			healthChecks: []healthCheckConfig{
 				{
 					url:                  "/livez",
@@ -292,9 +290,9 @@ func TestHTTPLivezReadyzHandler(t *testing.T) {
 			},
 		},
 		{
-			name:           "corrupt",
-			injectFailure:  triggerCorrupt,
-			clusterOptions: []e2e.EPClusterOption{e2e.WithClusterSize(3), e2e.WithCorruptCheckTime(time.Second)},
+			name:          "corrupt",
+			injectFailure: triggerCorrupt,
+			clusterConfig: e2e.EtcdProcessClusterConfig{ClusterSize: 3, CorruptCheckTime: time.Second},
 			healthChecks: []healthCheckConfig{
 				{
 					url:                    "/livez?verbose=true",
@@ -317,13 +315,13 @@ func TestHTTPLivezReadyzHandler(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			clus, err := e2e.NewEtcdProcessCluster(ctx, t, tc.clusterOptions...)
+			clus, err := e2e.NewEtcdProcessCluster(t, &tc.clusterConfig)
 			require.NoError(t, err)
 			defer clus.Close()
-			testutils.ExecuteUntil(ctx, t, func() {
+			e2e.ExecuteUntil(ctx, t, func() {
 				if tc.injectFailure != nil {
 					// guaranteed that failure point is active until all the health checks timeout.
-					duration := time.Duration(len(tc.healthChecks)+1) * healthCheckTimeout
+					duration := time.Duration(len(tc.healthChecks)+10) * healthCheckTimeout
 					tc.injectFailure(ctx, t, clus, duration)
 				}
 
@@ -364,9 +362,9 @@ func doHealthCheckAndVerify(t *testing.T, client *http.Client, url string, expec
 
 func triggerNoSpaceAlarm(ctx context.Context, t *testing.T, clus *e2e.EtcdProcessCluster, _ time.Duration) {
 	buf := strings.Repeat("b", os.Getpagesize())
-	etcdctl := clus.Etcdctl()
+	etcdctl := e2e.NewEtcdctl(clus.Procs[0].EndpointsV3(), e2e.ClientNonTLS, false, false)
 	for {
-		if err := etcdctl.Put(ctx, "foo", buf, config.PutOptions{}); err != nil {
+		if err := etcdctl.Put("foo", buf); err != nil {
 			if !strings.Contains(err.Error(), "etcdserver: mvcc: database space exceeded") {
 				t.Fatal(err)
 			}
@@ -379,7 +377,8 @@ func triggerSlowApply(ctx context.Context, t *testing.T, clus *e2e.EtcdProcessCl
 	// the following proposal will be blocked at applying stage
 	// because when apply index < committed index, linearizable read would time out.
 	require.NoError(t, clus.Procs[0].Failpoints().SetupHTTP(ctx, "beforeApplyOneEntryNormal", fmt.Sprintf(`sleep("%s")`, duration)))
-	require.NoError(t, clus.Procs[1].Etcdctl().Put(ctx, "foo", "bar", config.PutOptions{}))
+	etcdctl := e2e.NewEtcdctl(clus.Procs[1].EndpointsV3(), e2e.ClientNonTLS, false, false)
+	etcdctl.Put("foo", "bar")
 }
 
 func blackhole(_ context.Context, t *testing.T, clus *e2e.EtcdProcessCluster, _ time.Duration) {
@@ -391,35 +390,34 @@ func blackhole(_ context.Context, t *testing.T, clus *e2e.EtcdProcessCluster, _ 
 }
 
 func triggerRaftLoopDeadLock(ctx context.Context, t *testing.T, clus *e2e.EtcdProcessCluster, duration time.Duration) {
-	require.NoError(t, clus.Procs[0].Failpoints().SetupHTTP(ctx, "raftBeforeSave", fmt.Sprintf(`sleep("%s")`, duration)))
-	clus.Procs[0].Etcdctl().Put(context.Background(), "foo", "bar", config.PutOptions{Timeout: putCommandTimeout})
+	require.NoError(t, clus.Procs[0].Failpoints().SetupHTTP(ctx, "raftBeforeSaveWaitWalSync", fmt.Sprintf(`sleep("%s")`, duration)))
+	etcdctl := e2e.NewEtcdctl(clus.Procs[0].EndpointsV3(), e2e.ClientNonTLS, false, false)
+	etcdctl.Put("foo", "bar")
 }
 
 func triggerSlowBufferWriteBackWithAuth(ctx context.Context, t *testing.T, clus *e2e.EtcdProcessCluster, duration time.Duration) {
-	etcdctl := clus.Etcdctl()
-	_, err := etcdctl.UserAdd(ctx, "root", "root", config.UserAddOptions{})
+	etcdctl := e2e.NewEtcdctl(clus.Procs[0].EndpointsV3(), e2e.ClientNonTLS, false, false)
+
+	_, err := etcdctl.UserAdd("root", "root")
 	require.NoError(t, err)
-	_, err = etcdctl.UserGrantRole(ctx, "root", "root")
+	_, err = etcdctl.UserGrantRole("root", "root")
 	require.NoError(t, err)
-	require.NoError(t, etcdctl.AuthEnable(ctx))
+	require.NoError(t, etcdctl.AuthEnable())
 
 	require.NoError(t, clus.Procs[0].Failpoints().SetupHTTP(ctx, "beforeWritebackBuf", fmt.Sprintf(`sleep("%s")`, duration)))
-	clus.Procs[0].Etcdctl(e2e.WithAuth("root", "root")).Put(context.Background(), "foo", "bar", config.PutOptions{Timeout: putCommandTimeout})
+	etcdctl.PutWithAuth("foo", "bar", "root", "root")
 }
 
 func triggerCorrupt(ctx context.Context, t *testing.T, clus *e2e.EtcdProcessCluster, _ time.Duration) {
-	etcdctl := clus.Procs[0].Etcdctl()
+	etcdctl := e2e.NewEtcdctl(clus.Procs[0].EndpointsV3(), e2e.ClientNonTLS, false, false)
 	for i := 0; i < 10; i++ {
-		err := etcdctl.Put(ctx, "foo", "bar", config.PutOptions{})
-		require.NoError(t, err)
+		require.NoError(t, etcdctl.Put("foo", "bar"))
 	}
-	err := clus.Procs[0].Kill()
-	require.NoError(t, err)
-	err = clus.Procs[0].Wait(ctx)
+	err := clus.Procs[0].Stop()
 	require.NoError(t, err)
 	err = testutil.CorruptBBolt(path.Join(clus.Procs[0].Config().DataDirPath, "member", "snap", "db"))
 	require.NoError(t, err)
-	err = clus.Procs[0].Start(ctx)
+	err = clus.Procs[0].Start()
 	for {
 		time.Sleep(time.Second)
 		select {
@@ -427,7 +425,7 @@ func triggerCorrupt(ctx context.Context, t *testing.T, clus *e2e.EtcdProcessClus
 			require.NoError(t, err)
 		default:
 		}
-		response, err := etcdctl.AlarmList(ctx)
+		response, err := etcdctl.AlarmList()
 		if err != nil {
 			continue
 		}

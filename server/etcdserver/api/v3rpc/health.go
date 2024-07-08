@@ -15,11 +15,10 @@
 package v3rpc
 
 import (
+	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
-
-	"go.etcd.io/etcd/server/v3/etcdserver"
 )
 
 const (

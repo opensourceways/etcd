@@ -20,10 +20,13 @@ import (
 	"expvar"
 	"fmt"
 	"math"
+	"math/rand"
 	"net/http"
+	"os"
 	"path"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,6 +34,8 @@ import (
 	"github.com/coreos/go-semver/semver"
 	humanize "github.com/dustin/go-humanize"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.etcd.io/etcd/server/v3/config"
+	"go.etcd.io/etcd/server/v3/wal/walpb"
 	"go.uber.org/zap"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -38,43 +43,35 @@ import (
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/client/pkg/v3/types"
-	"go.etcd.io/etcd/client/pkg/v3/verify"
-	"go.etcd.io/etcd/pkg/v3/featuregate"
 	"go.etcd.io/etcd/pkg/v3/idutil"
-	"go.etcd.io/etcd/pkg/v3/notify"
 	"go.etcd.io/etcd/pkg/v3/pbutil"
 	"go.etcd.io/etcd/pkg/v3/runtime"
 	"go.etcd.io/etcd/pkg/v3/schedule"
 	"go.etcd.io/etcd/pkg/v3/traceutil"
 	"go.etcd.io/etcd/pkg/v3/wait"
+	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/auth"
-	"go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/etcdserver/api"
-	httptypes "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp/types"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v2discovery"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v2http/httptypes"
 	stats "go.etcd.io/etcd/server/v3/etcdserver/api/v2stats"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v2store"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v3alarm"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v3compactor"
-	"go.etcd.io/etcd/server/v3/etcdserver/apply"
 	"go.etcd.io/etcd/server/v3/etcdserver/cindex"
-	"go.etcd.io/etcd/server/v3/etcdserver/errors"
-	"go.etcd.io/etcd/server/v3/etcdserver/txn"
-	serverversion "go.etcd.io/etcd/server/v3/etcdserver/version"
 	"go.etcd.io/etcd/server/v3/lease"
 	"go.etcd.io/etcd/server/v3/lease/leasehttp"
-	serverstorage "go.etcd.io/etcd/server/v3/storage"
-	"go.etcd.io/etcd/server/v3/storage/backend"
-	"go.etcd.io/etcd/server/v3/storage/mvcc"
-	"go.etcd.io/etcd/server/v3/storage/schema"
-	"go.etcd.io/raft/v3"
-	"go.etcd.io/raft/v3/raftpb"
+	"go.etcd.io/etcd/server/v3/mvcc"
+	"go.etcd.io/etcd/server/v3/mvcc/backend"
+	"go.etcd.io/etcd/server/v3/wal"
 )
 
 const (
-	DefaultSnapshotCount = 10000
+	DefaultSnapshotCount = 100000
 
 	// DefaultSnapshotCatchUpEntries is the number of entries for a slow follower
 	// to catch-up after compacting the raft storage entries.
@@ -87,7 +84,7 @@ const (
 	StoreKeysPrefix    = "/1"
 
 	// HealthInterval is the minimum time the cluster should be healthy
-	// before accepting add and delete member requests.
+	// before accepting add member requests.
 	HealthInterval = 5 * time.Second
 
 	purgeFileInterval = 30 * time.Second
@@ -103,9 +100,7 @@ const (
 
 	recommendedMaxRequestBytes = 10 * 1024 * 1024
 
-	// readyPercentThreshold is a threshold used to determine
-	// whether a learner is ready for a transition into a full voting member or not.
-	readyPercentThreshold = 0.9
+	readyPercent = 0.9
 
 	DowngradeEnabledPath = "/downgrade/enabled"
 )
@@ -121,10 +116,12 @@ var (
 )
 
 func init() {
+	rand.Seed(time.Now().UnixNano())
+
 	expvar.Publish(
 		"file_descriptor_limit",
 		expvar.Func(
-			func() any {
+			func() interface{} {
 				n, _ := runtime.FDLimit()
 				return n
 			},
@@ -144,12 +141,15 @@ type ServerV2 interface {
 	Server
 	Leader() types.ID
 
+	// Do takes a V2 request and attempts to fulfill it, returning a Response.
+	Do(ctx context.Context, r pb.Request) (Response, error)
+	stats.Stats
 	ClientCertAuthEnabled() bool
 }
 
 type ServerV3 interface {
 	Server
-	apply.RaftStatusGetter
+	RaftStatusGetter
 }
 
 func (s *EtcdServer) ClientCertAuthEnabled() bool { return s.Cfg.ClientCertAuthEnabled }
@@ -187,9 +187,6 @@ type Server interface {
 	// the leader is etcd 2.0. etcd 2.0 leader will not update clusterVersion since
 	// this feature is introduced post 2.0.
 	ClusterVersion() *semver.Version
-	// StorageVersion is the storage schema version. It's supported starting
-	// from 3.6.
-	StorageVersion() *semver.Version
 	Cluster() api.Cluster
 	Alarms() []*pb.AlarmMember
 
@@ -238,10 +235,11 @@ type EtcdServer struct {
 	// done is closed when all goroutines from start() complete.
 	done chan struct{}
 	// leaderChanged is used to notify the linearizable read loop to drop the old read requests.
-	leaderChanged *notify.Notifier
+	leaderChanged   chan struct{}
+	leaderChangedMu sync.RWMutex
 
 	errorc     chan error
-	memberID   types.ID
+	id         types.ID
 	attributes membership.Attributes
 
 	cluster *membership.RaftCluster
@@ -249,15 +247,21 @@ type EtcdServer struct {
 	v2store     v2store.Store
 	snapshotter *snap.Snapshotter
 
-	uberApply apply.UberApplier
+	applyV2 ApplierV2
 
-	applyWait wait.WaitTime
+	// applyV3 is the applier with auth and quotas
+	applyV3 applierV3
+	// applyV3Base is the core applier without auth or quotas
+	applyV3Base applierV3
+	// applyV3Internal is the applier for internal request
+	applyV3Internal applierV3Internal
+	applyWait       wait.WaitTime
 
 	kv         mvcc.WatchableKV
 	lessor     lease.Lessor
-	bemu       sync.RWMutex
+	bemu       sync.Mutex
 	be         backend.Backend
-	beHooks    *serverstorage.BackendHooks
+	beHooks    *backendHooks
 	authStore  auth.AuthStore
 	alarmStore *v3alarm.AlarmStore
 
@@ -286,63 +290,310 @@ type EtcdServer struct {
 	leadTimeMu      sync.RWMutex
 	leadElectedTime time.Time
 
-	firstCommitInTerm     *notify.Notifier
-	clusterVersionChanged *notify.Notifier
+	firstCommitInTermMu sync.RWMutex
+	firstCommitInTermC  chan struct{}
 
 	*AccessController
-	// forceSnapshot can force snapshot be triggered after apply, independent of the snapshotCount.
-	// Should only be set within apply code path. Used to force snapshot after cluster version downgrade.
-	forceSnapshot     bool
 	corruptionChecker CorruptionChecker
+}
+
+type backendHooks struct {
+	indexer cindex.ConsistentIndexer
+	lg      *zap.Logger
+
+	// confState to be written in the next submitted backend transaction (if dirty)
+	confState raftpb.ConfState
+	// first write changes it to 'dirty'. false by default, so
+	// not initialized `confState` is meaningless.
+	confStateDirty bool
+	confStateLock  sync.Mutex
+}
+
+func (bh *backendHooks) OnPreCommitUnsafe(tx backend.BatchTx) {
+	bh.indexer.UnsafeSave(tx)
+	bh.confStateLock.Lock()
+	defer bh.confStateLock.Unlock()
+	if bh.confStateDirty {
+		membership.MustUnsafeSaveConfStateToBackend(bh.lg, tx, &bh.confState)
+		// save bh.confState
+		bh.confStateDirty = false
+	}
+}
+
+func (bh *backendHooks) SetConfState(confState *raftpb.ConfState) {
+	bh.confStateLock.Lock()
+	defer bh.confStateLock.Unlock()
+	bh.confState = *confState
+	bh.confStateDirty = true
 }
 
 // NewServer creates a new EtcdServer from the supplied configuration. The
 // configuration is considered static for the lifetime of the EtcdServer.
 func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
-	b, err := bootstrap(cfg)
-	if err != nil {
-		cfg.Logger.Error("bootstrap failed", zap.Error(err))
-		return nil, err
+	st := v2store.New(StoreClusterPrefix, StoreKeysPrefix)
+
+	var (
+		w  *wal.WAL
+		n  raft.Node
+		s  *raft.MemoryStorage
+		id types.ID
+		cl *membership.RaftCluster
+	)
+
+	if cfg.MaxRequestBytes > recommendedMaxRequestBytes {
+		cfg.Logger.Warn(
+			"exceeded recommended request limit",
+			zap.Uint("max-request-bytes", cfg.MaxRequestBytes),
+			zap.String("max-request-size", humanize.Bytes(uint64(cfg.MaxRequestBytes))),
+			zap.Int("recommended-request-bytes", recommendedMaxRequestBytes),
+			zap.String("recommended-request-size", recommendedMaxRequestBytesString),
+		)
 	}
-	cfg.Logger.Info("bootstrap successfully")
+
+	if terr := fileutil.TouchDirAll(cfg.Logger, cfg.DataDir); terr != nil {
+		return nil, fmt.Errorf("cannot access data directory: %v", terr)
+	}
+
+	haveWAL := wal.Exist(cfg.WALDir())
+
+	if err = fileutil.TouchDirAll(cfg.Logger, cfg.SnapDir()); err != nil {
+		cfg.Logger.Fatal(
+			"failed to create snapshot directory",
+			zap.String("path", cfg.SnapDir()),
+			zap.Error(err),
+		)
+	}
+
+	if err = fileutil.RemoveMatchFile(cfg.Logger, cfg.SnapDir(), func(fileName string) bool {
+		return strings.HasPrefix(fileName, "tmp")
+	}); err != nil {
+		cfg.Logger.Error(
+			"failed to remove temp file(s) in snapshot directory",
+			zap.String("path", cfg.SnapDir()),
+			zap.Error(err),
+		)
+	}
+
+	ss := snap.New(cfg.Logger, cfg.SnapDir())
+
+	bepath := cfg.BackendPath()
+	beExist := fileutil.Exist(bepath)
+
+	ci := cindex.NewConsistentIndex(nil)
+	beHooks := &backendHooks{lg: cfg.Logger, indexer: ci}
+	be := openBackend(cfg, beHooks)
+	ci.SetBackend(be)
+	cindex.CreateMetaBucket(be.BatchTx())
+
+	if cfg.ExperimentalBootstrapDefragThresholdMegabytes != 0 {
+		err := maybeDefragBackend(cfg, be)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	defer func() {
-		if err != nil {
-			b.Close()
+		if be != nil && err != nil {
+			be.Close()
 		}
 	}()
 
-	sstats := stats.NewServerStats(cfg.Name, b.cluster.cl.String())
-	lstats := stats.NewLeaderStats(cfg.Logger, b.cluster.nodeID.String())
+	prt, err := rafthttp.NewRoundTripper(cfg.PeerTLSInfo, cfg.PeerDialTimeout())
+	if err != nil {
+		return nil, err
+	}
+	var (
+		remotes  []*membership.Member
+		snapshot *raftpb.Snapshot
+	)
+
+	switch {
+	case !haveWAL && !cfg.NewCluster:
+		if err = cfg.VerifyJoinExisting(); err != nil {
+			return nil, err
+		}
+		cl, err = membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, cfg.InitialPeerURLsMap)
+		if err != nil {
+			return nil, err
+		}
+		existingCluster, gerr := GetClusterFromRemotePeers(cfg.Logger, getRemotePeerURLs(cl, cfg.Name), prt)
+		if gerr != nil {
+			return nil, fmt.Errorf("cannot fetch cluster info from peer urls: %v", gerr)
+		}
+		if err = membership.ValidateClusterAndAssignIDs(cfg.Logger, cl, existingCluster); err != nil {
+			return nil, fmt.Errorf("error validating peerURLs %s: %v", existingCluster, err)
+		}
+		if !isCompatibleWithCluster(cfg.Logger, cl, cl.MemberByName(cfg.Name).ID, prt) {
+			return nil, fmt.Errorf("incompatible with current running cluster")
+		}
+
+		remotes = existingCluster.Members()
+		cl.SetID(types.ID(0), existingCluster.ID())
+		cl.SetStore(st)
+		cl.SetBackend(be)
+		id, n, s, w = startNode(cfg, cl, nil)
+		cl.SetID(id, existingCluster.ID())
+
+	case !haveWAL && cfg.NewCluster:
+		if err = cfg.VerifyBootstrap(); err != nil {
+			return nil, err
+		}
+		cl, err = membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, cfg.InitialPeerURLsMap)
+		if err != nil {
+			return nil, err
+		}
+		m := cl.MemberByName(cfg.Name)
+		if isMemberBootstrapped(cfg.Logger, cl, cfg.Name, prt, cfg.BootstrapTimeoutEffective()) {
+			return nil, fmt.Errorf("member %s has already been bootstrapped", m.ID)
+		}
+		if cfg.ShouldDiscover() {
+			var str string
+			str, err = v2discovery.JoinCluster(cfg.Logger, cfg.DiscoveryURL, cfg.DiscoveryProxy, m.ID, cfg.InitialPeerURLsMap.String())
+			if err != nil {
+				return nil, &DiscoveryError{Op: "join", Err: err}
+			}
+			var urlsmap types.URLsMap
+			urlsmap, err = types.NewURLsMap(str)
+			if err != nil {
+				return nil, err
+			}
+			if config.CheckDuplicateURL(urlsmap) {
+				return nil, fmt.Errorf("discovery cluster %s has duplicate url", urlsmap)
+			}
+			if cl, err = membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, urlsmap); err != nil {
+				return nil, err
+			}
+		}
+		cl.SetStore(st)
+		cl.SetBackend(be)
+		id, n, s, w = startNode(cfg, cl, cl.MemberIDs())
+		cl.SetID(id, cl.ID())
+
+	case haveWAL:
+		if err = fileutil.IsDirWriteable(cfg.MemberDir()); err != nil {
+			return nil, fmt.Errorf("cannot write to member directory: %v", err)
+		}
+
+		if err = fileutil.IsDirWriteable(cfg.WALDir()); err != nil {
+			return nil, fmt.Errorf("cannot write to WAL directory: %v", err)
+		}
+
+		if cfg.ShouldDiscover() {
+			cfg.Logger.Warn(
+				"discovery token is ignored since cluster already initialized; valid logs are found",
+				zap.String("wal-dir", cfg.WALDir()),
+			)
+		}
+
+		// Find a snapshot to start/restart a raft node
+		var walSnaps []walpb.Snapshot
+		walSnaps, err = wal.ValidSnapshotEntries(cfg.Logger, cfg.WALDir())
+		if err != nil {
+			return nil, err
+		}
+		// snapshot files can be orphaned if etcd crashes after writing them but before writing the corresponding
+		// wal log entries
+		snapshot, err = ss.LoadNewestAvailable(walSnaps)
+		if err != nil && err != snap.ErrNoSnapshot {
+			return nil, err
+		}
+
+		if snapshot != nil {
+			if err = st.Recovery(snapshot.Data); err != nil {
+				cfg.Logger.Panic("failed to recover from snapshot", zap.Error(err))
+			}
+
+			if err = assertNoV2StoreContent(cfg.Logger, st, cfg.V2Deprecation); err != nil {
+				cfg.Logger.Error("illegal v2store content", zap.Error(err))
+				return nil, err
+			}
+
+			cfg.Logger.Info(
+				"recovered v2 store from snapshot",
+				zap.Uint64("snapshot-index", snapshot.Metadata.Index),
+				zap.String("snapshot-size", humanize.Bytes(uint64(snapshot.Size()))),
+			)
+
+			if be, err = recoverSnapshotBackend(cfg, be, *snapshot, beExist, beHooks); err != nil {
+				cfg.Logger.Panic("failed to recover v3 backend from snapshot", zap.Error(err))
+			}
+			// A snapshot db may have already been recovered, and the old db should have
+			// already been closed in this case, so we should set the backend again.
+			ci.SetBackend(be)
+			s1, s2 := be.Size(), be.SizeInUse()
+			cfg.Logger.Info(
+				"recovered v3 backend from snapshot",
+				zap.Int64("backend-size-bytes", s1),
+				zap.String("backend-size", humanize.Bytes(uint64(s1))),
+				zap.Int64("backend-size-in-use-bytes", s2),
+				zap.String("backend-size-in-use", humanize.Bytes(uint64(s2))),
+			)
+		} else {
+			cfg.Logger.Info("No snapshot found. Recovering WAL from scratch!")
+		}
+
+		if !cfg.ForceNewCluster {
+			id, cl, n, s, w = restartNode(cfg, snapshot)
+		} else {
+			id, cl, n, s, w = restartAsStandaloneNode(cfg, snapshot)
+		}
+
+		cl.SetStore(st)
+		cl.SetBackend(be)
+		cl.Recover(api.UpdateCapability)
+		if cl.Version() != nil && !cl.Version().LessThan(semver.Version{Major: 3}) && !beExist {
+			os.RemoveAll(bepath)
+			return nil, fmt.Errorf("database file (%v) of the backend is missing", bepath)
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported bootstrap config")
+	}
+
+	if terr := fileutil.TouchDirAll(cfg.Logger, cfg.MemberDir()); terr != nil {
+		return nil, fmt.Errorf("cannot access member directory: %v", terr)
+	}
+
+	sstats := stats.NewServerStats(cfg.Name, id.String())
+	lstats := stats.NewLeaderStats(cfg.Logger, id.String())
 
 	heartbeat := time.Duration(cfg.TickMs) * time.Millisecond
 	srv = &EtcdServer{
-		readych:               make(chan struct{}),
-		Cfg:                   cfg,
-		lgMu:                  new(sync.RWMutex),
-		lg:                    cfg.Logger,
-		errorc:                make(chan error, 1),
-		v2store:               b.storage.st,
-		snapshotter:           b.ss,
-		r:                     *b.raft.newRaftNode(b.ss, b.storage.wal.w, b.cluster.cl),
-		memberID:              b.cluster.nodeID,
-		attributes:            membership.Attributes{Name: cfg.Name, ClientURLs: cfg.ClientURLs.StringSlice()},
-		cluster:               b.cluster.cl,
-		stats:                 sstats,
-		lstats:                lstats,
-		SyncTicker:            time.NewTicker(500 * time.Millisecond),
-		peerRt:                b.prt,
-		reqIDGen:              idutil.NewGenerator(uint16(b.cluster.nodeID), time.Now()),
-		AccessController:      &AccessController{CORS: cfg.CORS, HostWhitelist: cfg.HostWhitelist},
-		consistIndex:          b.storage.backend.ci,
-		firstCommitInTerm:     notify.NewNotifier(),
-		clusterVersionChanged: notify.NewNotifier(),
+		readych:     make(chan struct{}),
+		Cfg:         cfg,
+		lgMu:        new(sync.RWMutex),
+		lg:          cfg.Logger,
+		errorc:      make(chan error, 1),
+		v2store:     st,
+		snapshotter: ss,
+		r: *newRaftNode(
+			raftNodeConfig{
+				lg:          cfg.Logger,
+				isIDRemoved: func(id uint64) bool { return cl.IsIDRemoved(types.ID(id)) },
+				Node:        n,
+				heartbeat:   heartbeat,
+				raftStorage: s,
+				storage:     NewStorage(w, ss),
+			},
+		),
+		id:                 id,
+		attributes:         membership.Attributes{Name: cfg.Name, ClientURLs: cfg.ClientURLs.StringSlice()},
+		cluster:            cl,
+		stats:              sstats,
+		lstats:             lstats,
+		SyncTicker:         time.NewTicker(500 * time.Millisecond),
+		peerRt:             prt,
+		reqIDGen:           idutil.NewGenerator(uint16(id), time.Now()),
+		AccessController:   &AccessController{CORS: cfg.CORS, HostWhitelist: cfg.HostWhitelist},
+		consistIndex:       ci,
+		firstCommitInTermC: make(chan struct{}),
 	}
-	serverID.With(prometheus.Labels{"server_id": b.cluster.nodeID.String()}).Set(1)
-	srv.cluster.SetVersionChangedNotifier(srv.clusterVersionChanged)
+	serverID.With(prometheus.Labels{"server_id": id.String()}).Set(1)
 
-	srv.be = b.storage.backend.be
-	srv.beHooks = b.storage.backend.beHooks
+	srv.applyV2 = NewApplierV2(cfg.Logger, srv.v2store, srv.cluster)
+
+	srv.be = be
+	srv.beHooks = beHooks
 	minTTL := time.Duration((3*cfg.ElectionTicks)/2) * heartbeat
 
 	// always recover lessor before kv. When we recover the mvcc.KV it will reattach keys to its leases.
@@ -364,15 +615,26 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		cfg.Logger.Warn("failed to create token provider", zap.Error(err))
 		return nil, err
 	}
+	srv.kv = mvcc.New(srv.Logger(), srv.be, srv.lessor, mvcc.StoreConfig{CompactionBatchLimit: cfg.CompactionBatchLimit})
 
-	mvccStoreConfig := mvcc.StoreConfig{
-		CompactionBatchLimit:    cfg.CompactionBatchLimit,
-		CompactionSleepInterval: cfg.CompactionSleepInterval,
+	kvindex := ci.ConsistentIndex()
+	srv.lg.Debug("restore consistentIndex", zap.Uint64("index", kvindex))
+	if beExist {
+		// TODO: remove kvindex != 0 checking when we do not expect users to upgrade
+		// etcd from pre-3.0 release.
+		if snapshot != nil && kvindex < snapshot.Metadata.Index {
+			if kvindex != 0 {
+				return nil, fmt.Errorf("database file (%v index %d) does not match with snapshot (index %d)", bepath, kvindex, snapshot.Metadata.Index)
+			}
+			cfg.Logger.Warn(
+				"consistent index was never saved",
+				zap.Uint64("snapshot-index", snapshot.Metadata.Index),
+			)
+		}
 	}
-	srv.kv = mvcc.New(srv.Logger(), srv.be, srv.lessor, mvccStoreConfig)
 	srv.corruptionChecker = newCorruptionChecker(cfg.Logger, srv, srv.kv.HashStorage())
 
-	srv.authStore = auth.NewAuthStore(srv.Logger(), schema.NewAuthBackend(srv.Logger(), srv.be), tp, int(cfg.BcryptCost))
+	srv.authStore = auth.NewAuthStore(srv.Logger(), srv.be, tp, int(cfg.BcryptCost))
 
 	newSrv := srv // since srv == nil in defer if srv is returned as nil
 	defer func() {
@@ -390,17 +652,18 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		srv.compactor.Run()
 	}
 
+	srv.applyV3Base = srv.newApplierV3Backend()
+	srv.applyV3Internal = srv.newApplierV3Internal()
 	if err = srv.restoreAlarms(); err != nil {
 		return nil, err
 	}
-	srv.uberApply = srv.NewUberApplier()
 
 	if srv.Cfg.EnableLeaseCheckpoint {
 		// setting checkpointer enables lease checkpoint feature.
 		srv.lessor.SetCheckpointer(func(ctx context.Context, cp *pb.LeaseCheckpointRequest) error {
 			if !srv.ensureLeadership() {
 				srv.lg.Warn("Ignore the checkpoint request because current member isn't a leader",
-					zap.Uint64("local-member-id", uint64(srv.MemberID())))
+					zap.Uint64("local-member-id", uint64(srv.ID())))
 				return lease.ErrNotPrimary
 			}
 
@@ -418,11 +681,11 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		Logger:      cfg.Logger,
 		TLSInfo:     cfg.PeerTLSInfo,
 		DialTimeout: cfg.PeerDialTimeout(),
-		ID:          b.cluster.nodeID,
+		ID:          id,
 		URLs:        cfg.PeerURLs,
-		ClusterID:   b.cluster.cl.ID(),
+		ClusterID:   cl.ID(),
 		Raft:        srv,
-		Snapshotter: b.ss,
+		Snapshotter: ss,
 		ServerStats: sstats,
 		LeaderStats: lstats,
 		ErrorC:      srv.errorc,
@@ -431,19 +694,36 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		return nil, err
 	}
 	// add all remotes into transport
-	for _, m := range b.cluster.remotes {
-		if m.ID != b.cluster.nodeID {
+	for _, m := range remotes {
+		if m.ID != id {
 			tr.AddRemote(m.ID, m.PeerURLs)
 		}
 	}
-	for _, m := range b.cluster.cl.Members() {
-		if m.ID != b.cluster.nodeID {
+	for _, m := range cl.Members() {
+		if m.ID != id {
 			tr.AddPeer(m.ID, m.PeerURLs)
 		}
 	}
 	srv.r.transport = tr
 
 	return srv, nil
+}
+
+// assertNoV2StoreContent -> depending on the deprecation stage, warns or report an error
+// if the v2store contains custom content.
+func assertNoV2StoreContent(lg *zap.Logger, st v2store.Store, deprecationStage config.V2DeprecationEnum) error {
+	metaOnly, err := membership.IsMetaStoreOnly(st)
+	if err != nil {
+		return err
+	}
+	if metaOnly {
+		return nil
+	}
+	if deprecationStage.IsAtLeast(config.V2_DEPR_1_WRITE_ONLY) {
+		return fmt.Errorf("detected disallowed custom content in v2store for stage --v2-deprecation=%s", deprecationStage)
+	}
+	lg.Warn("detected custom v2store content. Etcd v3.5 is the last version allowing to access it using API v2. Please remove the content.")
+	return nil
 }
 
 func (s *EtcdServer) Logger() *zap.Logger {
@@ -455,11 +735,6 @@ func (s *EtcdServer) Logger() *zap.Logger {
 
 func (s *EtcdServer) Config() config.ServerConfig {
 	return s.Cfg
-}
-
-// FeatureEnabled returns true if the feature is enabled by the etcd server, false otherwise.
-func (s *EtcdServer) FeatureEnabled(f featuregate.Feature) bool {
-	return s.Cfg.ServerFeatureGate.Enabled(f)
 }
 
 func tickToDur(ticks int, tickMs uint) string {
@@ -475,7 +750,7 @@ func (s *EtcdServer) adjustTicks() {
 		ticks := s.Cfg.ElectionTicks - 1
 		lg.Info(
 			"started as single-node; fast-forwarding election ticks",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.Int("forward-ticks", ticks),
 			zap.String("forward-duration", tickToDur(ticks, s.Cfg.TickMs)),
 			zap.Int("election-ticks", s.Cfg.ElectionTicks),
@@ -514,7 +789,7 @@ func (s *EtcdServer) adjustTicks() {
 
 			lg.Info(
 				"initialized peer connections; fast-forwarding election ticks",
-				zap.String("local-member-id", s.MemberID().String()),
+				zap.String("local-member-id", s.ID().String()),
 				zap.Int("forward-ticks", ticks),
 				zap.String("forward-duration", tickToDur(ticks, s.Cfg.TickMs)),
 				zap.Int("election-ticks", s.Cfg.ElectionTicks),
@@ -535,11 +810,12 @@ func (s *EtcdServer) adjustTicks() {
 func (s *EtcdServer) Start() {
 	s.start()
 	s.GoAttach(func() { s.adjustTicks() })
-	s.GoAttach(func() { s.publishV3(s.Cfg.ReqTimeout()) })
+	// TODO: Switch to publishV3 in 3.6.
+	// Support for cluster_member_set_attr was added in 3.5.
+	s.GoAttach(func() { s.publish(s.Cfg.ReqTimeout()) })
 	s.GoAttach(s.purgeFile)
 	s.GoAttach(func() { monitorFileDescriptor(s.Logger(), s.stopping) })
-	s.GoAttach(s.monitorClusterVersions)
-	s.GoAttach(s.monitorStorageVersion)
+	s.GoAttach(s.monitorVersions)
 	s.GoAttach(s.linearizableReadLoop)
 	s.GoAttach(s.monitorKVHash)
 	s.GoAttach(s.monitorCompactHash)
@@ -577,11 +853,11 @@ func (s *EtcdServer) start() {
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.readwaitc = make(chan struct{}, 1)
 	s.readNotifier = newNotifier()
-	s.leaderChanged = notify.NewNotifier()
+	s.leaderChanged = make(chan struct{})
 	if s.ClusterVersion() != nil {
 		lg.Info(
 			"starting etcd server",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.String("local-server-version", version.Version),
 			zap.String("cluster-id", s.Cluster().ID().String()),
 			zap.String("cluster-version", version.Cluster(s.ClusterVersion().String())),
@@ -590,7 +866,7 @@ func (s *EtcdServer) start() {
 	} else {
 		lg.Info(
 			"starting etcd server",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.String("local-server-version", version.Version),
 			zap.String("cluster-version", "to_be_decided"),
 		)
@@ -659,7 +935,7 @@ type ServerPeerV2 interface {
 	DowngradeEnabledHandler() http.Handler
 }
 
-func (s *EtcdServer) DowngradeInfo() *serverversion.DowngradeInfo { return s.cluster.DowngradeInfo() }
+func (s *EtcdServer) DowngradeInfo() *membership.DowngradeInfo { return s.cluster.DowngradeInfo() }
 
 type downgradeEnabledHandler struct {
 	lg      *zap.Logger
@@ -710,15 +986,15 @@ func (s *EtcdServer) Process(ctx context.Context, m raftpb.Message) error {
 	if s.cluster.IsIDRemoved(types.ID(m.From)) {
 		lg.Warn(
 			"rejected Raft message from removed member",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.String("removed-member-id", types.ID(m.From).String()),
 		)
 		return httptypes.NewHTTPError(http.StatusForbidden, "cannot process message from removed member")
 	}
-	if s.MemberID() != types.ID(m.To) {
+	if s.ID() != types.ID(m.To) {
 		lg.Warn(
 			"rejected Raft message to mismatch member",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.String("mismatch-member-id", types.ID(m.To).String()),
 		)
 		return httptypes.NewHTTPError(http.StatusForbidden, "cannot process message to mismatch member")
@@ -748,7 +1024,7 @@ type etcdProgress struct {
 
 // raftReadyHandler contains a set of EtcdServer operations to be called by raftNode,
 // and helps decouple state machine logic from Raft algorithms.
-// TODO: add a state machine interface to toApply the commit entries and do snapshot/recover
+// TODO: add a state machine interface to apply the commit entries and do snapshot/recover
 type raftReadyHandler struct {
 	getLead              func() (lead uint64)
 	updateLead           func(lead uint64)
@@ -764,9 +1040,24 @@ func (s *EtcdServer) run() {
 		lg.Panic("failed to get snapshot from Raft storage", zap.Error(err))
 	}
 
-	// asynchronously accept toApply packets, dispatch progress in-order
-	sched := schedule.NewFIFOScheduler(lg)
+	// asynchronously accept apply packets, dispatch progress in-order
+	sched := schedule.NewFIFOScheduler()
 
+	var (
+		smu   sync.RWMutex
+		syncC <-chan time.Time
+	)
+	setSyncC := func(ch <-chan time.Time) {
+		smu.Lock()
+		syncC = ch
+		smu.Unlock()
+	}
+	getSyncC := func() (ch <-chan time.Time) {
+		smu.RLock()
+		ch = syncC
+		smu.RUnlock()
+		return
+	}
 	rh := &raftReadyHandler{
 		getLead:    func() (lead uint64) { return s.getLead() },
 		updateLead: func(lead uint64) { s.setLead(lead) },
@@ -778,6 +1069,7 @@ func (s *EtcdServer) run() {
 				if s.compactor != nil {
 					s.compactor.Pause()
 				}
+				setSyncC(nil)
 			} else {
 				if newLeader {
 					t := time.Now()
@@ -785,12 +1077,17 @@ func (s *EtcdServer) run() {
 					s.leadElectedTime = t
 					s.leadTimeMu.Unlock()
 				}
+				setSyncC(s.SyncTicker.C)
 				if s.compactor != nil {
 					s.compactor.Resume()
 				}
 			}
 			if newLeader {
-				s.leaderChanged.Notify()
+				s.leaderChangedMu.Lock()
+				lc := s.leaderChanged
+				s.leaderChanged = make(chan struct{})
+				close(lc)
+				s.leaderChangedMu.Unlock()
 			}
 			// TODO: remove the nil checking
 			// current test utility does not provide the stats
@@ -821,7 +1118,7 @@ func (s *EtcdServer) run() {
 		s.cancel()
 		sched.Stop()
 
-		// wait for goroutines before closing raft so wal stays open
+		// wait for gouroutines before closing raft so wal stays open
 		s.wg.Wait()
 
 		s.SyncTicker.Stop()
@@ -843,7 +1140,7 @@ func (s *EtcdServer) run() {
 	for {
 		select {
 		case ap := <-s.r.apply():
-			f := schedule.NewJob("server_applyAll", func(context.Context) { s.applyAll(&ep, &ap) })
+			f := func(context.Context) { s.applyAll(&ep, &ap) }
 			sched.Schedule(f)
 		case leases := <-expiredLeaseC:
 			s.revokeExpiredLeases(leases)
@@ -851,6 +1148,10 @@ func (s *EtcdServer) run() {
 			lg.Warn("server error", zap.Error(err))
 			lg.Warn("data-dir used by this member must be removed")
 			return
+		case <-getSyncC():
+			if s.v2store.HasTTLKeys() {
+				s.sync(s.Cfg.ReqTimeout())
+			}
 		case <-s.stop:
 			return
 		}
@@ -868,7 +1169,7 @@ func (s *EtcdServer) revokeExpiredLeases(leases []*lease.Lease) {
 		lg := s.Logger()
 		if !s.ensureLeadership() {
 			lg.Warn("Ignore the lease revoking request because current member isn't a leader",
-				zap.Uint64("local-member-id", uint64(s.MemberID())))
+				zap.Uint64("local-member-id", uint64(s.ID())))
 			return
 		}
 
@@ -916,11 +1217,11 @@ func (s *EtcdServer) ensureLeadership() bool {
 		return false
 	}
 
-	newLeaderID := s.raftStatus().Lead
-	if newLeaderID != uint64(s.MemberID()) {
+	newLeaderId := s.raftStatus().Lead
+	if newLeaderId != uint64(s.ID()) {
 		lg.Warn("Current member isn't a leader",
-			zap.Uint64("local-member-id", uint64(s.MemberID())),
-			zap.Uint64("new-lead", newLeaderID))
+			zap.Uint64("local-member-id", uint64(s.ID())),
+			zap.Uint64("new-lead", newLeaderId))
 		return false
 	}
 
@@ -949,17 +1250,16 @@ func (s *EtcdServer) Cleanup() {
 	}
 }
 
-func (s *EtcdServer) applyAll(ep *etcdProgress, apply *toApply) {
+func (s *EtcdServer) applyAll(ep *etcdProgress, apply *apply) {
 	s.applySnapshot(ep, apply)
 	s.applyEntries(ep, apply)
-	backend.VerifyBackendConsistency(s.Backend(), s.Logger(), true, schema.AllBuckets...)
 
 	proposalsApplied.Set(float64(ep.appliedi))
 	s.applyWait.Trigger(ep.appliedi)
 
 	// wait for the raft routine to finish the disk writes before triggering a
 	// snapshot. or applied index might be greater than the last index in raft
-	// storage, since the raft routine might be slower than toApply routine.
+	// storage, since the raft routine might be slower than apply routine.
 	<-apply.notifyc
 
 	s.triggerSnapshot(ep)
@@ -972,8 +1272,8 @@ func (s *EtcdServer) applyAll(ep *etcdProgress, apply *toApply) {
 	}
 }
 
-func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
-	if raft.IsEmptySnap(toApply.snapshot) {
+func (s *EtcdServer) applySnapshot(ep *etcdProgress, apply *apply) {
+	if raft.IsEmptySnap(apply.snapshot) {
 		return
 	}
 	applySnapshotInProgress.Inc()
@@ -983,35 +1283,34 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 		"applying snapshot",
 		zap.Uint64("current-snapshot-index", ep.snapi),
 		zap.Uint64("current-applied-index", ep.appliedi),
-		zap.Uint64("incoming-leader-snapshot-index", toApply.snapshot.Metadata.Index),
-		zap.Uint64("incoming-leader-snapshot-term", toApply.snapshot.Metadata.Term),
+		zap.Uint64("incoming-leader-snapshot-index", apply.snapshot.Metadata.Index),
+		zap.Uint64("incoming-leader-snapshot-term", apply.snapshot.Metadata.Term),
 	)
 	defer func() {
 		lg.Info(
 			"applied snapshot",
 			zap.Uint64("current-snapshot-index", ep.snapi),
 			zap.Uint64("current-applied-index", ep.appliedi),
-			zap.Uint64("incoming-leader-snapshot-index", toApply.snapshot.Metadata.Index),
-			zap.Uint64("incoming-leader-snapshot-term", toApply.snapshot.Metadata.Term),
+			zap.Uint64("incoming-leader-snapshot-index", apply.snapshot.Metadata.Index),
+			zap.Uint64("incoming-leader-snapshot-term", apply.snapshot.Metadata.Term),
 		)
 		applySnapshotInProgress.Dec()
 	}()
 
-	if toApply.snapshot.Metadata.Index <= ep.appliedi {
+	if apply.snapshot.Metadata.Index <= ep.appliedi {
 		lg.Panic(
 			"unexpected leader snapshot from outdated index",
 			zap.Uint64("current-snapshot-index", ep.snapi),
 			zap.Uint64("current-applied-index", ep.appliedi),
-			zap.Uint64("incoming-leader-snapshot-index", toApply.snapshot.Metadata.Index),
-			zap.Uint64("incoming-leader-snapshot-term", toApply.snapshot.Metadata.Term),
+			zap.Uint64("incoming-leader-snapshot-index", apply.snapshot.Metadata.Index),
+			zap.Uint64("incoming-leader-snapshot-term", apply.snapshot.Metadata.Term),
 		)
 	}
 
 	// wait for raftNode to persist snapshot onto the disk
-	<-toApply.notifyc
+	<-apply.notifyc
 
-	// gofail: var applyBeforeOpenSnapshot struct{}
-	newbe, err := serverstorage.OpenSnapshotBackend(s.Cfg, s.snapshotter, toApply.snapshot, s.beHooks)
+	newbe, err := openSnapshotBackend(s.Cfg, s.snapshotter, apply.snapshot, s.beHooks)
 	if err != nil {
 		lg.Panic("failed to open snapshot backend", zap.Error(err))
 	}
@@ -1022,7 +1321,6 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 	// Eventually the new consistent_index value coming from snapshot is overwritten
 	// by the old value.
 	s.consistIndex.SetBackend(newbe)
-	verifySnapshotIndex(toApply.snapshot, s.consistIndex.ConsistentIndex())
 
 	// always recover lessor before kv. When we recover the mvcc.KV it will reattach keys to its leases.
 	// If we recover mvcc.KV first, it will attach the keys to the wrong lessor before it recovers.
@@ -1041,7 +1339,6 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 	}
 
 	newbe.SetTxPostLockInsideApplyHook(s.getTxPostLockInsideApplyHook())
-
 	lg.Info("restored mvcc store", zap.Uint64("consistent-index", s.consistIndex.ConsistentIndex()))
 
 	// Closing old backend might block until all the txns
@@ -1073,23 +1370,23 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 	if s.authStore != nil {
 		lg.Info("restoring auth store")
 
-		s.authStore.Recover(schema.NewAuthBackend(lg, newbe))
+		s.authStore.Recover(newbe)
 
 		lg.Info("restored auth store")
 	}
 
 	lg.Info("restoring v2 store")
-	if err := s.v2store.Recovery(toApply.snapshot.Data); err != nil {
+	if err := s.v2store.Recovery(apply.snapshot.Data); err != nil {
 		lg.Panic("failed to restore v2 store", zap.Error(err))
 	}
 
-	if err := serverstorage.AssertNoV2StoreContent(lg, s.v2store, s.Cfg.V2Deprecation); err != nil {
+	if err := assertNoV2StoreContent(lg, s.v2store, s.Cfg.V2Deprecation); err != nil {
 		lg.Panic("illegal v2store content", zap.Error(err))
 	}
 
 	lg.Info("restored v2 store")
 
-	s.cluster.SetBackend(schema.NewMembershipBackend(lg, newbe))
+	s.cluster.SetBackend(newbe)
 
 	lg.Info("restoring cluster configuration")
 
@@ -1105,7 +1402,7 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 	lg.Info("adding peers from new cluster configuration")
 
 	for _, m := range s.cluster.Members() {
-		if m.ID == s.MemberID() {
+		if m.ID == s.ID() {
 			continue
 		}
 		s.r.transport.AddPeer(m.ID, m.PeerURLs)
@@ -1113,38 +1410,13 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 
 	lg.Info("added peers from new cluster configuration")
 
-	ep.appliedt = toApply.snapshot.Metadata.Term
-	ep.appliedi = toApply.snapshot.Metadata.Index
+	ep.appliedt = apply.snapshot.Metadata.Term
+	ep.appliedi = apply.snapshot.Metadata.Index
 	ep.snapi = ep.appliedi
-	ep.confState = toApply.snapshot.Metadata.ConfState
-
-	// As backends and implementations like alarmsStore changed, we need
-	// to re-bootstrap Appliers.
-	s.uberApply = s.NewUberApplier()
+	ep.confState = apply.snapshot.Metadata.ConfState
 }
 
-func (s *EtcdServer) NewUberApplier() apply.UberApplier {
-	return apply.NewUberApplier(s.lg, s.be, s.KV(), s.alarmStore, s.authStore, s.lessor, s.cluster, s, s, s.consistIndex,
-		s.Cfg.WarningApplyDuration, s.Cfg.ExperimentalTxnModeWriteWithSharedBuffer, s.Cfg.QuotaBackendBytes)
-}
-
-func verifySnapshotIndex(snapshot raftpb.Snapshot, cindex uint64) {
-	verify.Verify(func() {
-		if cindex != snapshot.Metadata.Index {
-			panic(fmt.Sprintf("consistent_index(%d) isn't equal to snapshot index (%d)", cindex, snapshot.Metadata.Index))
-		}
-	})
-}
-
-func verifyConsistentIndexIsLatest(lg *zap.Logger, snapshot raftpb.Snapshot, cindex uint64) {
-	verify.Verify(func() {
-		if cindex < snapshot.Metadata.Index {
-			lg.Panic(fmt.Sprintf("consistent_index(%d) is older than snapshot index (%d)", cindex, snapshot.Metadata.Index))
-		}
-	})
-}
-
-func (s *EtcdServer) applyEntries(ep *etcdProgress, apply *toApply) {
+func (s *EtcdServer) applyEntries(ep *etcdProgress, apply *apply) {
 	if len(apply.entries) == 0 {
 		return
 	}
@@ -1165,36 +1437,27 @@ func (s *EtcdServer) applyEntries(ep *etcdProgress, apply *toApply) {
 		return
 	}
 	var shouldstop bool
-	if ep.appliedt, ep.appliedi, shouldstop = s.apply(ents, &ep.confState, apply.raftAdvancedC); shouldstop {
+	if ep.appliedt, ep.appliedi, shouldstop = s.apply(ents, &ep.confState); shouldstop {
 		go s.stopWithDelay(10*100*time.Millisecond, fmt.Errorf("the member has been permanently removed from the cluster"))
 	}
 }
 
-func (s *EtcdServer) ForceSnapshot() {
-	s.forceSnapshot = true
-}
-
 func (s *EtcdServer) triggerSnapshot(ep *etcdProgress) {
-	if !s.shouldSnapshot(ep) {
+	if ep.appliedi-ep.snapi <= s.Cfg.SnapshotCount {
 		return
 	}
+
 	lg := s.Logger()
 	lg.Info(
 		"triggering snapshot",
-		zap.String("local-member-id", s.MemberID().String()),
+		zap.String("local-member-id", s.ID().String()),
 		zap.Uint64("local-member-applied-index", ep.appliedi),
 		zap.Uint64("local-member-snapshot-index", ep.snapi),
 		zap.Uint64("local-member-snapshot-count", s.Cfg.SnapshotCount),
-		zap.Bool("snapshot-forced", s.forceSnapshot),
 	)
-	s.forceSnapshot = false
 
 	s.snapshot(ep.appliedi, ep.confState)
 	ep.snapi = ep.appliedi
-}
-
-func (s *EtcdServer) shouldSnapshot(ep *etcdProgress) bool {
-	return (s.forceSnapshot && ep.appliedi != ep.snapi) || (ep.appliedi-ep.snapi > s.Cfg.SnapshotCount)
 }
 
 func (s *EtcdServer) hasMultipleVotingMembers() bool {
@@ -1202,13 +1465,13 @@ func (s *EtcdServer) hasMultipleVotingMembers() bool {
 }
 
 func (s *EtcdServer) isLeader() bool {
-	return uint64(s.MemberID()) == s.Lead()
+	return uint64(s.ID()) == s.Lead()
 }
 
 // MoveLeader transfers the leader to the given transferee.
 func (s *EtcdServer) MoveLeader(ctx context.Context, lead, transferee uint64) error {
 	if !s.cluster.IsMemberExist(types.ID(transferee)) || s.cluster.Member(types.ID(transferee)).IsLearner {
-		return errors.ErrBadLeaderTransferee
+		return ErrBadLeaderTransferee
 	}
 
 	now := time.Now()
@@ -1217,7 +1480,7 @@ func (s *EtcdServer) MoveLeader(ctx context.Context, lead, transferee uint64) er
 	lg := s.Logger()
 	lg.Info(
 		"leadership transfer starting",
-		zap.String("local-member-id", s.MemberID().String()),
+		zap.String("local-member-id", s.ID().String()),
 		zap.String("current-leader-member-id", types.ID(lead).String()),
 		zap.String("transferee-member-id", types.ID(transferee).String()),
 	)
@@ -1226,7 +1489,7 @@ func (s *EtcdServer) MoveLeader(ctx context.Context, lead, transferee uint64) er
 	for s.Lead() != transferee {
 		select {
 		case <-ctx.Done(): // time out
-			return errors.ErrTimeoutLeaderTransfer
+			return ErrTimeoutLeaderTransfer
 		case <-time.After(interval):
 		}
 	}
@@ -1234,7 +1497,7 @@ func (s *EtcdServer) MoveLeader(ctx context.Context, lead, transferee uint64) er
 	// TODO: drain all requests, or drop all messages to the old leader
 	lg.Info(
 		"leadership transfer finished",
-		zap.String("local-member-id", s.MemberID().String()),
+		zap.String("local-member-id", s.ID().String()),
 		zap.String("old-leader-member-id", types.ID(lead).String()),
 		zap.String("new-leader-member-id", types.ID(transferee).String()),
 		zap.Duration("took", time.Since(now)),
@@ -1242,13 +1505,13 @@ func (s *EtcdServer) MoveLeader(ctx context.Context, lead, transferee uint64) er
 	return nil
 }
 
-// TryTransferLeadershipOnShutdown transfers the leader to the chosen transferee. It is only used in server graceful shutdown.
-func (s *EtcdServer) TryTransferLeadershipOnShutdown() error {
+// TransferLeadership transfers the leader to the chosen transferee.
+func (s *EtcdServer) TransferLeadership() error {
 	lg := s.Logger()
 	if !s.isLeader() {
 		lg.Info(
 			"skipped leadership transfer; local server is not leader",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.String("current-leader-member-id", types.ID(s.Lead()).String()),
 		)
 		return nil
@@ -1257,7 +1520,7 @@ func (s *EtcdServer) TryTransferLeadershipOnShutdown() error {
 	if !s.hasMultipleVotingMembers() {
 		lg.Info(
 			"skipped leadership transfer for single voting member cluster",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.String("current-leader-member-id", types.ID(s.Lead()).String()),
 		)
 		return nil
@@ -1265,7 +1528,7 @@ func (s *EtcdServer) TryTransferLeadershipOnShutdown() error {
 
 	transferee, ok := longestConnected(s.r.transport, s.cluster.VotingMemberIDs())
 	if !ok {
-		return errors.ErrUnhealthy
+		return ErrUnhealthy
 	}
 
 	tm := s.Cfg.ReqTimeout()
@@ -1293,8 +1556,8 @@ func (s *EtcdServer) HardStop() {
 // Do and Process cannot be called after Stop has been invoked.
 func (s *EtcdServer) Stop() {
 	lg := s.Logger()
-	if err := s.TryTransferLeadershipOnShutdown(); err != nil {
-		lg.Warn("leadership transfer failed", zap.String("local-member-id", s.MemberID().String()), zap.Error(err))
+	if err := s.TransferLeadership(); err != nil {
+		lg.Warn("leadership transfer failed", zap.String("local-member-id", s.ID().String()), zap.Error(err))
 	}
 	s.HardStop()
 }
@@ -1314,13 +1577,25 @@ func (s *EtcdServer) stopWithDelay(d time.Duration, err error) {
 	}
 }
 
-// StopNotify returns a channel that receives an empty struct
+// StopNotify returns a channel that receives a empty struct
 // when the server is stopped.
 func (s *EtcdServer) StopNotify() <-chan struct{} { return s.done }
 
-// StoppingNotify returns a channel that receives an empty struct
+// StoppingNotify returns a channel that receives a empty struct
 // when the server is being stopped.
 func (s *EtcdServer) StoppingNotify() <-chan struct{} { return s.stopping }
+
+func (s *EtcdServer) SelfStats() []byte { return s.stats.JSON() }
+
+func (s *EtcdServer) LeaderStats() []byte {
+	lead := s.getLead()
+	if lead != uint64(s.id) {
+		return nil
+	}
+	return s.lstats.JSON()
+}
+
+func (s *EtcdServer) StoreStats() []byte { return s.v2store.JsonStats() }
 
 func (s *EtcdServer) checkMembershipOperationPermission(ctx context.Context) error {
 	if s.authStore == nil {
@@ -1331,7 +1606,7 @@ func (s *EtcdServer) checkMembershipOperationPermission(ctx context.Context) err
 
 	// Note that this permission check is done in the API layer,
 	// so TOCTOU problem can be caused potentially in a schedule like this:
-	// update membership with user A -> revoke root role of A -> toApply membership change
+	// update membership with user A -> revoke root role of A -> apply membership change
 	// in the state machine layer
 	// However, both of membership change and role management requires the root privilege.
 	// So careful operation by admins can prevent the problem.
@@ -1382,21 +1657,21 @@ func (s *EtcdServer) mayAddMember(memb membership.Member) error {
 	if !memb.IsLearner && !s.cluster.IsReadyToAddVotingMember() {
 		lg.Warn(
 			"rejecting member add request; not enough healthy members",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.String("requested-member-add", fmt.Sprintf("%+v", memb)),
-			zap.Error(errors.ErrNotEnoughStartedMembers),
+			zap.Error(ErrNotEnoughStartedMembers),
 		)
-		return errors.ErrNotEnoughStartedMembers
+		return ErrNotEnoughStartedMembers
 	}
 
-	if !isConnectedFullySince(s.r.transport, time.Now().Add(-HealthInterval), s.MemberID(), s.cluster.VotingMembers()) {
+	if !isConnectedFullySince(s.r.transport, time.Now().Add(-HealthInterval), s.ID(), s.cluster.VotingMembers()) {
 		lg.Warn(
 			"rejecting member add request; local member has not been connected to all peers, reconfigure breaks active quorum",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.String("requested-member-add", fmt.Sprintf("%+v", memb)),
-			zap.Error(errors.ErrUnhealthy),
+			zap.Error(ErrUnhealthy),
 		)
-		return errors.ErrUnhealthy
+		return ErrUnhealthy
 	}
 
 	return nil
@@ -1429,7 +1704,7 @@ func (s *EtcdServer) PromoteMember(ctx context.Context, id uint64) ([]*membershi
 		learnerPromoteSucceed.Inc()
 		return resp, nil
 	}
-	if err != errors.ErrNotLeader {
+	if err != ErrNotLeader {
 		learnerPromoteFailed.WithLabelValues(err.Error()).Inc()
 		return resp, err
 	}
@@ -1448,16 +1723,16 @@ func (s *EtcdServer) PromoteMember(ctx context.Context, id uint64) ([]*membershi
 				return resp, nil
 			}
 			// If member promotion failed, return early. Otherwise keep retry.
-			if err == errors.ErrLearnerNotReady || err == membership.ErrIDNotFound || err == membership.ErrMemberNotLearner {
+			if err == ErrLearnerNotReady || err == membership.ErrIDNotFound || err == membership.ErrMemberNotLearner {
 				return nil, err
 			}
 		}
 	}
 
 	if cctx.Err() == context.DeadlineExceeded {
-		return nil, errors.ErrTimeout
+		return nil, ErrTimeout
 	}
-	return nil, errors.ErrCanceled
+	return nil, ErrCanceled
 }
 
 // promoteMember checks whether the to-be-promoted learner node is ready before sending the promote
@@ -1500,7 +1775,8 @@ func (s *EtcdServer) promoteMember(ctx context.Context, id uint64) ([]*membershi
 
 func (s *EtcdServer) mayPromoteMember(id types.ID) error {
 	lg := s.Logger()
-	if err := s.isLearnerReady(lg, uint64(id)); err != nil {
+	err := s.isLearnerReady(uint64(id))
+	if err != nil {
 		return err
 	}
 
@@ -1510,11 +1786,11 @@ func (s *EtcdServer) mayPromoteMember(id types.ID) error {
 	if !s.cluster.IsReadyToPromoteMember(uint64(id)) {
 		lg.Warn(
 			"rejecting member promote request; not enough healthy members",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.String("requested-member-remove-id", id.String()),
-			zap.Error(errors.ErrNotEnoughStartedMembers),
+			zap.Error(ErrNotEnoughStartedMembers),
 		)
-		return errors.ErrNotEnoughStartedMembers
+		return ErrNotEnoughStartedMembers
 	}
 
 	return nil
@@ -1522,8 +1798,8 @@ func (s *EtcdServer) mayPromoteMember(id types.ID) error {
 
 // check whether the learner catches up with leader or not.
 // Note: it will return nil if member is not found in cluster or if member is not learner.
-// These two conditions will be checked before toApply phase later.
-func (s *EtcdServer) isLearnerReady(lg *zap.Logger, id uint64) error {
+// These two conditions will be checked before apply phase later.
+func (s *EtcdServer) isLearnerReady(id uint64) error {
 	if err := s.waitAppliedIndex(); err != nil {
 		return err
 	}
@@ -1532,7 +1808,7 @@ func (s *EtcdServer) isLearnerReady(lg *zap.Logger, id uint64) error {
 
 	// leader's raftStatus.Progress is not nil
 	if rs.Progress == nil {
-		return errors.ErrNotLeader
+		return ErrNotLeader
 	}
 
 	var learnerMatch uint64
@@ -1554,17 +1830,9 @@ func (s *EtcdServer) isLearnerReady(lg *zap.Logger, id uint64) error {
 	}
 
 	leaderMatch := rs.Progress[leaderID].Match
-
-	learnerReadyPercent := float64(learnerMatch) / float64(leaderMatch)
-
 	// the learner's Match not caught up with leader yet
-	if learnerReadyPercent < readyPercentThreshold {
-		lg.Error(
-			"rejecting promote learner: learner is not ready",
-			zap.Float64("learner-ready-percent", learnerReadyPercent),
-			zap.Float64("ready-percent-threshold", readyPercentThreshold),
-		)
-		return errors.ErrLearnerNotReady
+	if float64(learnerMatch) < float64(leaderMatch)*readyPercent {
+		return ErrLearnerNotReady
 	}
 
 	return nil
@@ -1585,30 +1853,30 @@ func (s *EtcdServer) mayRemoveMember(id types.ID) error {
 	if !s.cluster.IsReadyToRemoveVotingMember(uint64(id)) {
 		lg.Warn(
 			"rejecting member remove request; not enough healthy members",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.String("requested-member-remove-id", id.String()),
-			zap.Error(errors.ErrNotEnoughStartedMembers),
+			zap.Error(ErrNotEnoughStartedMembers),
 		)
-		return errors.ErrNotEnoughStartedMembers
+		return ErrNotEnoughStartedMembers
 	}
 
 	// downed member is safe to remove since it's not part of the active quorum
-	if t := s.r.transport.ActiveSince(id); id != s.MemberID() && t.IsZero() {
+	if t := s.r.transport.ActiveSince(id); id != s.ID() && t.IsZero() {
 		return nil
 	}
 
 	// protect quorum if some members are down
 	m := s.cluster.VotingMembers()
-	active := numConnectedSince(s.r.transport, time.Now().Add(-HealthInterval), s.MemberID(), m)
+	active := numConnectedSince(s.r.transport, time.Now().Add(-HealthInterval), s.ID(), m)
 	if (active - 1) < 1+((len(m)-1)/2) {
 		lg.Warn(
 			"rejecting member remove request; local member has not been connected to all peers, reconfigure breaks active quorum",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.String("requested-member-remove", id.String()),
 			zap.Int("active-peers", active),
-			zap.Error(errors.ErrUnhealthy),
+			zap.Error(ErrUnhealthy),
 		)
-		return errors.ErrUnhealthy
+		return ErrUnhealthy
 	}
 
 	return nil
@@ -1664,7 +1932,9 @@ func (s *EtcdServer) getLead() uint64 {
 }
 
 func (s *EtcdServer) LeaderChangedNotify() <-chan struct{} {
-	return s.leaderChanged.Receive()
+	s.leaderChangedMu.RLock()
+	defer s.leaderChangedMu.RUnlock()
+	return s.leaderChanged
 }
 
 // FirstCommitInTermNotify returns channel that will be unlocked on first
@@ -1672,18 +1942,21 @@ func (s *EtcdServer) LeaderChangedNotify() <-chan struct{} {
 // read-only requests (leader is not able to respond any read-only requests
 // as long as linearizable semantic is required)
 func (s *EtcdServer) FirstCommitInTermNotify() <-chan struct{} {
-	return s.firstCommitInTerm.Receive()
+	s.firstCommitInTermMu.RLock()
+	defer s.firstCommitInTermMu.RUnlock()
+	return s.firstCommitInTermC
 }
 
-// MemberId returns the ID of the local member.
-// Deprecated: Please use (*EtcdServer) MemberID instead.
-//
-//revive:disable:var-naming
-func (s *EtcdServer) MemberId() types.ID { return s.MemberID() }
+// RaftStatusGetter represents etcd server and Raft progress.
+type RaftStatusGetter interface {
+	ID() types.ID
+	Leader() types.ID
+	CommittedIndex() uint64
+	AppliedIndex() uint64
+	Term() uint64
+}
 
-//revive:enable:var-naming
-
-func (s *EtcdServer) MemberID() types.ID { return s.memberID }
+func (s *EtcdServer) ID() types.ID { return s.id }
 
 func (s *EtcdServer) Leader() types.ID { return types.ID(s.getLead()) }
 
@@ -1696,9 +1969,8 @@ func (s *EtcdServer) AppliedIndex() uint64 { return s.getAppliedIndex() }
 func (s *EtcdServer) Term() uint64 { return s.getTerm() }
 
 type confChangeResponse struct {
-	membs        []*membership.Member
-	raftAdvanceC <-chan struct{}
-	err          error
+	membs []*membership.Member
+	err   error
 }
 
 // configure sends a configuration change through consensus and
@@ -1721,14 +1993,9 @@ func (s *EtcdServer) configure(ctx context.Context, cc raftpb.ConfChange) ([]*me
 			lg.Panic("failed to configure")
 		}
 		resp := x.(*confChangeResponse)
-		// etcdserver need to ensure the raft has already been notified
-		// or advanced before it responds to the client. Otherwise, the
-		// following config change request may be rejected.
-		// See https://github.com/etcd-io/etcd/issues/15528.
-		<-resp.raftAdvanceC
 		lg.Info(
 			"applied a configuration change through raft",
-			zap.String("local-member-id", s.MemberID().String()),
+			zap.String("local-member-id", s.ID().String()),
 			zap.String("raft-conf-change", cc.Type.String()),
 			zap.String("raft-conf-change-node-id", types.ID(cc.NodeID).String()),
 		)
@@ -1739,8 +2006,27 @@ func (s *EtcdServer) configure(ctx context.Context, cc raftpb.ConfChange) ([]*me
 		return nil, s.parseProposeCtxErr(ctx.Err(), start)
 
 	case <-s.stopping:
-		return nil, errors.ErrStopped
+		return nil, ErrStopped
 	}
+}
+
+// sync proposes a SYNC request and is non-blocking.
+// This makes no guarantee that the request will be proposed or performed.
+// The request will be canceled after the given timeout.
+func (s *EtcdServer) sync(timeout time.Duration) {
+	req := pb.Request{
+		Method: "SYNC",
+		ID:     s.reqIDGen.Next(),
+		Time:   time.Now().UnixNano(),
+	}
+	data := pbutil.MustMarshal(&req)
+	// There is no promise that node has leader when do SYNC request,
+	// so it uses goroutine to propose.
+	ctx, cancel := context.WithTimeout(s.ctx, timeout)
+	s.GoAttach(func() {
+		s.r.Propose(ctx, data)
+		cancel()
+	})
 }
 
 // publishV3 registers server information into the cluster using v3 request. The
@@ -1750,7 +2036,7 @@ func (s *EtcdServer) configure(ctx context.Context, cc raftpb.ConfChange) ([]*me
 // or its server is stopped.
 func (s *EtcdServer) publishV3(timeout time.Duration) {
 	req := &membershippb.ClusterMemberAttrSetRequest{
-		Member_ID: uint64(s.MemberID()),
+		Member_ID: uint64(s.id),
 		MemberAttributes: &membershippb.Attributes{
 			Name:       s.attributes.Name,
 			ClientUrls: s.attributes.ClientURLs,
@@ -1762,7 +2048,7 @@ func (s *EtcdServer) publishV3(timeout time.Duration) {
 		case <-s.stopping:
 			lg.Warn(
 				"stopped publish because server is stopping",
-				zap.String("local-member-id", s.MemberID().String()),
+				zap.String("local-member-id", s.ID().String()),
 				zap.String("local-member-attributes", fmt.Sprintf("%+v", s.attributes)),
 				zap.Duration("publish-timeout", timeout),
 			)
@@ -1779,7 +2065,7 @@ func (s *EtcdServer) publishV3(timeout time.Duration) {
 			close(s.readych)
 			lg.Info(
 				"published local member to cluster through raft",
-				zap.String("local-member-id", s.MemberID().String()),
+				zap.String("local-member-id", s.ID().String()),
 				zap.String("local-member-attributes", fmt.Sprintf("%+v", s.attributes)),
 				zap.String("cluster-id", s.cluster.ID().String()),
 				zap.Duration("publish-timeout", timeout),
@@ -1789,8 +2075,72 @@ func (s *EtcdServer) publishV3(timeout time.Duration) {
 		default:
 			lg.Warn(
 				"failed to publish local member to cluster through raft",
-				zap.String("local-member-id", s.MemberID().String()),
+				zap.String("local-member-id", s.ID().String()),
 				zap.String("local-member-attributes", fmt.Sprintf("%+v", s.attributes)),
+				zap.Duration("publish-timeout", timeout),
+				zap.Error(err),
+			)
+		}
+	}
+}
+
+// publish registers server information into the cluster. The information
+// is the JSON representation of this server's member struct, updated with the
+// static clientURLs of the server.
+// The function keeps attempting to register until it succeeds,
+// or its server is stopped.
+//
+// Use v2 store to encode member attributes, and apply through Raft
+// but does not go through v2 API endpoint, which means even with v2
+// client handler disabled (e.g. --enable-v2=false), cluster can still
+// process publish requests through rafthttp
+// TODO: Remove in 3.6 (start using publishV3)
+func (s *EtcdServer) publish(timeout time.Duration) {
+	lg := s.Logger()
+	b, err := json.Marshal(s.attributes)
+	if err != nil {
+		lg.Panic("failed to marshal JSON", zap.Error(err))
+		return
+	}
+	req := pb.Request{
+		Method: "PUT",
+		Path:   membership.MemberAttributesStorePath(s.id),
+		Val:    string(b),
+	}
+
+	for {
+		ctx, cancel := context.WithTimeout(s.ctx, timeout)
+		_, err := s.Do(ctx, req)
+		cancel()
+		switch err {
+		case nil:
+			close(s.readych)
+			lg.Info(
+				"published local member to cluster through raft",
+				zap.String("local-member-id", s.ID().String()),
+				zap.String("local-member-attributes", fmt.Sprintf("%+v", s.attributes)),
+				zap.String("request-path", req.Path),
+				zap.String("cluster-id", s.cluster.ID().String()),
+				zap.Duration("publish-timeout", timeout),
+			)
+			return
+
+		case ErrStopped:
+			lg.Warn(
+				"stopped publish because server is stopped",
+				zap.String("local-member-id", s.ID().String()),
+				zap.String("local-member-attributes", fmt.Sprintf("%+v", s.attributes)),
+				zap.Duration("publish-timeout", timeout),
+				zap.Error(err),
+			)
+			return
+
+		default:
+			lg.Warn(
+				"failed to publish local member to cluster through raft",
+				zap.String("local-member-id", s.ID().String()),
+				zap.String("local-member-attributes", fmt.Sprintf("%+v", s.attributes)),
+				zap.String("request-path", req.Path),
 				zap.Duration("publish-timeout", timeout),
 				zap.Error(err),
 			)
@@ -1803,7 +2153,7 @@ func (s *EtcdServer) sendMergedSnap(merged snap.Message) {
 
 	lg := s.Logger()
 	fields := []zap.Field{
-		zap.String("from", s.MemberID().String()),
+		zap.String("from", s.ID().String()),
 		zap.String("to", types.ID(merged.To).String()),
 		zap.Int64("bytes", merged.TotalSize),
 		zap.String("size", humanize.Bytes(uint64(merged.TotalSize))),
@@ -1838,48 +2188,45 @@ func (s *EtcdServer) sendMergedSnap(merged snap.Message) {
 	})
 }
 
-// toApply takes entries received from Raft (after it has been committed) and
+// apply takes entries received from Raft (after it has been committed) and
 // applies them to the current state of the EtcdServer.
 // The given entries should not be empty.
 func (s *EtcdServer) apply(
 	es []raftpb.Entry,
 	confState *raftpb.ConfState,
-	raftAdvancedC <-chan struct{},
 ) (appliedt uint64, appliedi uint64, shouldStop bool) {
 	s.lg.Debug("Applying entries", zap.Int("num-entries", len(es)))
 	for i := range es {
 		e := es[i]
-		index := s.consistIndex.ConsistentIndex()
 		s.lg.Debug("Applying entry",
-			zap.Uint64("consistent-index", index),
-			zap.Uint64("entry-index", e.Index),
-			zap.Uint64("entry-term", e.Term),
-			zap.Stringer("entry-type", e.Type))
-
-		// We need to toApply all WAL entries on top of v2store
-		// and only 'unapplied' (e.Index>backend.ConsistentIndex) on the backend.
-		shouldApplyV3 := membership.ApplyV2storeOnly
-		if e.Index > index {
-			shouldApplyV3 = membership.ApplyBoth
-			// set the consistent index of current executing entry
-			s.consistIndex.SetConsistentApplyingIndex(e.Index, e.Term)
-		}
+			zap.Uint64("index", e.Index),
+			zap.Uint64("term", e.Term),
+			zap.Stringer("type", e.Type))
 		switch e.Type {
 		case raftpb.EntryNormal:
 			// gofail: var beforeApplyOneEntryNormal struct{}
-			s.applyEntryNormal(&e, shouldApplyV3)
+			s.applyEntryNormal(&e)
 			s.setAppliedIndex(e.Index)
 			s.setTerm(e.Term)
 
 		case raftpb.EntryConfChange:
-			// gofail: var beforeApplyOneConfChange struct{}
+			// We need to apply all WAL entries on top of v2store
+			// and only 'unapplied' (e.Index>backend.ConsistentIndex) on the backend.
+			shouldApplyV3 := membership.ApplyV2storeOnly
+
+			// set the consistent index of current executing entry
+			if e.Index > s.consistIndex.ConsistentIndex() {
+				s.consistIndex.SetConsistentApplyingIndex(e.Index, e.Term)
+				shouldApplyV3 = membership.ApplyBoth
+			}
+
 			var cc raftpb.ConfChange
 			pbutil.MustUnmarshal(&cc, e.Data)
 			removedSelf, err := s.applyConfChange(cc, confState, shouldApplyV3)
 			s.setAppliedIndex(e.Index)
 			s.setTerm(e.Term)
 			shouldStop = shouldStop || removedSelf
-			s.w.Trigger(cc.ID, &confChangeResponse{s.cluster.Members(), raftAdvancedC, err})
+			s.w.Trigger(cc.ID, &confChangeResponse{s.cluster.Members(), err})
 
 		default:
 			lg := s.Logger()
@@ -1893,10 +2240,15 @@ func (s *EtcdServer) apply(
 	return appliedt, appliedi, shouldStop
 }
 
-// applyEntryNormal applies an EntryNormal type raftpb request to the EtcdServer
-func (s *EtcdServer) applyEntryNormal(e *raftpb.Entry, shouldApplyV3 membership.ShouldApplyV3) {
-	var ar *apply.Result
-	if shouldApplyV3 {
+// applyEntryNormal apples an EntryNormal type raftpb request to the EtcdServer
+func (s *EtcdServer) applyEntryNormal(e *raftpb.Entry) {
+	shouldApplyV3 := membership.ApplyV2storeOnly
+	var ar *applyResult
+	index := s.consistIndex.ConsistentIndex()
+	if e.Index > index {
+		// set the consistent index of current executing entry
+		s.consistIndex.SetConsistentApplyingIndex(e.Index, e.Term)
+		shouldApplyV3 = membership.ApplyBoth
 		defer func() {
 			// The txPostLockInsideApplyHook will not get called in some cases,
 			// in which we should move the consistent index forward directly.
@@ -1906,11 +2258,15 @@ func (s *EtcdServer) applyEntryNormal(e *raftpb.Entry, shouldApplyV3 membership.
 			}
 		}()
 	}
+	s.lg.Debug("apply entry normal",
+		zap.Uint64("consistent-index", index),
+		zap.Uint64("entry-index", e.Index),
+		zap.Bool("should-applyV3", bool(shouldApplyV3)))
 
 	// raft state machine may generate noop entry when leader confirmation.
 	// skip it in advance to avoid some potential bug in the future
 	if len(e.Data) == 0 {
-		s.firstCommitInTerm.Notify()
+		s.notifyAboutFirstCommitInTerm()
 
 		// promote lessor when the local member is leader and finished
 		// applying all entries from the last term.
@@ -1926,24 +2282,19 @@ func (s *EtcdServer) applyEntryNormal(e *raftpb.Entry, shouldApplyV3 membership.
 		rp := &r
 		pbutil.MustUnmarshal(rp, e.Data)
 		s.lg.Debug("applyEntryNormal", zap.Stringer("V2request", rp))
-		s.applyV2Request((*RequestV2)(rp), shouldApplyV3)
-		s.w.Trigger(r.ID, Response{})
+		s.w.Trigger(r.ID, s.applyV2Request((*RequestV2)(rp), shouldApplyV3))
 		return
 	}
 	s.lg.Debug("applyEntryNormal", zap.Stringer("raftReq", &raftReq))
 
 	if raftReq.V2 != nil {
 		req := (*RequestV2)(raftReq.V2)
-		s.applyV2Request(req, shouldApplyV3)
-		s.w.Trigger(req.ID, Response{})
+		s.w.Trigger(req.ID, s.applyV2Request(req, shouldApplyV3))
 		return
 	}
 
 	id := raftReq.ID
 	if id == 0 {
-		if raftReq.Header == nil {
-			s.lg.Panic("applyEntryNormal, could not find a header")
-		}
 		id = raftReq.Header.ID
 	}
 
@@ -1952,10 +2303,10 @@ func (s *EtcdServer) applyEntryNormal(e *raftpb.Entry, shouldApplyV3 membership.
 		if !needResult && raftReq.Txn != nil {
 			removeNeedlessRangeReqs(raftReq.Txn)
 		}
-		ar = s.applyInternalRaftRequest(&raftReq, shouldApplyV3)
+		ar = s.applyV3.Apply(&raftReq, shouldApplyV3)
 	}
 
-	// do not re-toApply applied entries.
+	// do not re-apply applied entries.
 	if !shouldApplyV3 {
 		return
 	}
@@ -1964,7 +2315,7 @@ func (s *EtcdServer) applyEntryNormal(e *raftpb.Entry, shouldApplyV3 membership.
 		return
 	}
 
-	if ar.Err != errors.ErrNoSpace || len(s.alarmStore.Get(pb.AlarmType_NOSPACE)) > 0 {
+	if ar.err != ErrNoSpace || len(s.alarmStore.Get(pb.AlarmType_NOSPACE)) > 0 {
 		s.w.Trigger(id, ar)
 		return
 	}
@@ -1974,12 +2325,12 @@ func (s *EtcdServer) applyEntryNormal(e *raftpb.Entry, shouldApplyV3 membership.
 		"message exceeded backend quota; raising alarm",
 		zap.Int64("quota-size-bytes", s.Cfg.QuotaBackendBytes),
 		zap.String("quota-size", humanize.Bytes(uint64(s.Cfg.QuotaBackendBytes))),
-		zap.Error(ar.Err),
+		zap.Error(ar.err),
 	)
 
 	s.GoAttach(func() {
 		a := &pb.AlarmRequest{
-			MemberID: uint64(s.MemberID()),
+			MemberID: uint64(s.ID()),
 			Action:   pb.AlarmRequest_ACTIVATE,
 			Alarm:    pb.AlarmType_NOSPACE,
 		}
@@ -1988,65 +2339,19 @@ func (s *EtcdServer) applyEntryNormal(e *raftpb.Entry, shouldApplyV3 membership.
 	})
 }
 
-func (s *EtcdServer) applyInternalRaftRequest(r *pb.InternalRaftRequest, shouldApplyV3 membership.ShouldApplyV3) *apply.Result {
-	if r.ClusterVersionSet == nil && r.ClusterMemberAttrSet == nil && r.DowngradeInfoSet == nil {
-		if !shouldApplyV3 {
-			return nil
-		}
-		return s.uberApply.Apply(r)
-	}
-	membershipApplier := apply.NewApplierMembership(s.lg, s.cluster, s)
-	op := "unknown"
-	defer func(start time.Time) {
-		txn.ApplySecObserve("v3", op, true, time.Since(start))
-		txn.WarnOfExpensiveRequest(s.lg, s.Cfg.WarningApplyDuration, start, &pb.InternalRaftStringer{Request: r}, nil, nil)
-	}(time.Now())
-	switch {
-	case r.ClusterVersionSet != nil:
-		op = "ClusterVersionSet" // Implemented in 3.5.x
-		membershipApplier.ClusterVersionSet(r.ClusterVersionSet, shouldApplyV3)
-		return &apply.Result{}
-	case r.ClusterMemberAttrSet != nil:
-		op = "ClusterMemberAttrSet" // Implemented in 3.5.x
-		membershipApplier.ClusterMemberAttrSet(r.ClusterMemberAttrSet, shouldApplyV3)
-	case r.DowngradeInfoSet != nil:
-		op = "DowngradeInfoSet" // Implemented in 3.5.x
-		membershipApplier.DowngradeInfoSet(r.DowngradeInfoSet, shouldApplyV3)
-	default:
-		s.lg.Panic("not implemented apply", zap.Stringer("raft-request", r))
-		return nil
-	}
-	return &apply.Result{}
-}
-
-func noSideEffect(r *pb.InternalRaftRequest) bool {
-	return r.Range != nil || r.AuthUserGet != nil || r.AuthRoleGet != nil || r.AuthStatus != nil
-}
-
-func removeNeedlessRangeReqs(txn *pb.TxnRequest) {
-	f := func(ops []*pb.RequestOp) []*pb.RequestOp {
-		j := 0
-		for i := 0; i < len(ops); i++ {
-			if _, ok := ops[i].Request.(*pb.RequestOp_RequestRange); ok {
-				continue
-			}
-			ops[j] = ops[i]
-			j++
-		}
-
-		return ops[:j]
-	}
-
-	txn.Success = f(txn.Success)
-	txn.Failure = f(txn.Failure)
+func (s *EtcdServer) notifyAboutFirstCommitInTerm() {
+	newNotifier := make(chan struct{})
+	s.firstCommitInTermMu.Lock()
+	notifierToClose := s.firstCommitInTermC
+	s.firstCommitInTermC = newNotifier
+	s.firstCommitInTermMu.Unlock()
+	close(notifierToClose)
 }
 
 // applyConfChange applies a ConfChange to the server. It is only
 // invoked with a ConfChange that has already passed through Raft
 func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.ConfState, shouldApplyV3 membership.ShouldApplyV3) (bool, error) {
-	lg := s.Logger()
 	if err := s.cluster.ValidateConfigurationChange(cc); err != nil {
-		lg.Error("Validation on configuration change failed", zap.Bool("shouldApplyV3", bool(shouldApplyV3)), zap.Error(err))
 		cc.NodeID = raft.None
 		s.r.ApplyConfChange(cc)
 
@@ -2059,6 +2364,7 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.Con
 		return false, err
 	}
 
+	lg := s.Logger()
 	*confState = *s.r.ApplyConfChange(cc)
 	s.beHooks.SetConfState(confState)
 	switch cc.Type {
@@ -2079,15 +2385,24 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.Con
 		} else {
 			s.cluster.AddMember(&confChangeContext.Member, shouldApplyV3)
 
-			if confChangeContext.Member.ID != s.MemberID() {
+			if confChangeContext.Member.ID != s.id {
 				s.r.transport.AddPeer(confChangeContext.Member.ID, confChangeContext.PeerURLs)
+			}
+		}
+
+		// update the isLearner metric when this server id is equal to the id in raft member confChange
+		if confChangeContext.Member.ID == s.id {
+			if cc.Type == raftpb.ConfChangeAddLearnerNode {
+				isLearner.Set(1)
+			} else {
+				isLearner.Set(0)
 			}
 		}
 
 	case raftpb.ConfChangeRemoveNode:
 		id := types.ID(cc.NodeID)
 		s.cluster.RemoveMember(id, shouldApplyV3)
-		if id == s.MemberID() {
+		if id == s.id {
 			return true, nil
 		}
 		s.r.transport.RemovePeer(id)
@@ -2105,7 +2420,7 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.Con
 			)
 		}
 		s.cluster.UpdateRaftAttributes(m.ID, m.RaftAttributes, shouldApplyV3)
-		if m.ID != s.MemberID() {
+		if m.ID != s.id {
 			s.r.transport.UpdatePeer(m.ID, m.PeerURLs)
 		}
 	}
@@ -2114,7 +2429,7 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.Con
 
 // TODO: non-blocking snapshot
 func (s *EtcdServer) snapshot(snapi uint64, confState raftpb.ConfState) {
-	d := GetMembershipInfoInV2Format(s.Logger(), s.cluster)
+	clone := s.v2store.Clone()
 	// commit kv to write metadata (for example: consistent index) to disk.
 	//
 	// This guarantees that Backend's consistent_index is >= index of last snapshot.
@@ -2122,14 +2437,19 @@ func (s *EtcdServer) snapshot(snapi uint64, confState raftpb.ConfState) {
 	// KV().commit() updates the consistent index in backend.
 	// All operations that update consistent index must be called sequentially
 	// from applyAll function.
-	// So KV().Commit() cannot run in parallel with toApply. It has to be called outside
+	// So KV().Commit() cannot run in parallel with apply. It has to be called outside
 	// the go routine created below.
 	s.KV().Commit()
 
 	s.GoAttach(func() {
 		lg := s.Logger()
 
-		// For backward compatibility, generate v2 snapshot from v3 state.
+		d, err := clone.SaveNoCopy()
+		// TODO: current store will never fail to do a snapshot
+		// what should we do if the store might fail?
+		if err != nil {
+			lg.Panic("failed to save v2 store", zap.Error(err))
+		}
 		snap, err := s.r.raftStorage.CreateSnapshot(snapi, &confState, d)
 		if err != nil {
 			// the snapshot was done asynchronously with the progress of raft.
@@ -2139,9 +2459,6 @@ func (s *EtcdServer) snapshot(snapi uint64, confState raftpb.ConfState) {
 			}
 			lg.Panic("failed to create snapshot", zap.Error(err))
 		}
-
-		verifyConsistentIndexIsLatest(lg, snap, s.consistIndex.ConsistentIndex())
-
 		// SaveSnap saves the snapshot to file and appends the corresponding WAL entry.
 		if err = s.r.storage.SaveSnap(snap); err != nil {
 			lg.Panic("failed to save snapshot", zap.Error(err))
@@ -2214,55 +2531,48 @@ func (s *EtcdServer) ClusterVersion() *semver.Version {
 	return s.cluster.Version()
 }
 
-func (s *EtcdServer) StorageVersion() *semver.Version {
-	// `applySnapshot` sets a new backend instance, so we need to acquire the bemu lock.
-	s.bemu.RLock()
-	defer s.bemu.RUnlock()
-
-	v, err := schema.DetectSchemaVersion(s.lg, s.be.ReadTx())
-	if err != nil {
-		s.lg.Warn("Failed to detect schema version", zap.Error(err))
-		return nil
-	}
-	return &v
-}
-
-// monitorClusterVersions every monitorVersionInterval checks if it's the leader and updates cluster version if needed.
-func (s *EtcdServer) monitorClusterVersions() {
-	lg := s.Logger()
-	monitor := serverversion.NewMonitor(lg, NewServerVersionAdapter(s))
+// monitorVersions checks the member's version every monitorVersionInterval.
+// It updates the cluster version if all members agrees on a higher one.
+// It prints out log if there is a member with a higher version than the
+// local version.
+// TODO switch to updateClusterVersionV3 in 3.6
+func (s *EtcdServer) monitorVersions() {
 	for {
 		select {
-		case <-s.firstCommitInTerm.Receive():
+		case <-s.FirstCommitInTermNotify():
 		case <-time.After(monitorVersionInterval):
 		case <-s.stopping:
-			lg.Info("server has stopped; stopping cluster version's monitor")
 			return
 		}
 
-		if s.Leader() != s.MemberID() {
+		if s.Leader() != s.ID() {
 			continue
 		}
-		err := monitor.UpdateClusterVersionIfNeeded()
-		if err != nil {
-			s.lg.Error("Failed to monitor cluster version", zap.Error(err))
-		}
-	}
-}
 
-// monitorStorageVersion every monitorVersionInterval updates storage version if needed.
-func (s *EtcdServer) monitorStorageVersion() {
-	lg := s.Logger()
-	monitor := serverversion.NewMonitor(lg, NewServerVersionAdapter(s))
-	for {
-		select {
-		case <-time.After(monitorVersionInterval):
-		case <-s.clusterVersionChanged.Receive():
-		case <-s.stopping:
-			lg.Info("server has stopped; stopping storage version's monitor")
-			return
+		v := decideClusterVersion(s.Logger(), getVersions(s.Logger(), s.cluster, s.id, s.peerRt))
+		if v != nil {
+			// only keep major.minor version for comparison
+			v = &semver.Version{
+				Major: v.Major,
+				Minor: v.Minor,
+			}
 		}
-		monitor.UpdateStorageVersionIfNeeded()
+
+		// if the current version is nil:
+		// 1. use the decided version if possible
+		// 2. or use the min cluster version
+		if s.cluster.Version() == nil {
+			verStr := version.MinClusterVersion
+			if v != nil {
+				verStr = v.String()
+			}
+			s.GoAttach(func() { s.updateClusterVersionV2(verStr) })
+			continue
+		}
+
+		if v != nil && membership.IsValidVersionChange(s.cluster.Version(), v) {
+			s.GoAttach(func() { s.updateClusterVersionV2(v.String()) })
+		}
 	}
 }
 
@@ -2271,23 +2581,19 @@ func (s *EtcdServer) monitorKVHash() {
 	if t == 0 {
 		return
 	}
-	checkTicker := time.NewTicker(t)
-	defer checkTicker.Stop()
 
 	lg := s.Logger()
 	lg.Info(
 		"enabled corruption checking",
-		zap.String("local-member-id", s.MemberID().String()),
+		zap.String("local-member-id", s.ID().String()),
 		zap.Duration("interval", t),
 	)
 	for {
 		select {
 		case <-s.stopping:
-			lg.Info("server has stopped; stopping kv hash's monitor")
 			return
-		case <-checkTicker.C:
+		case <-time.After(t):
 		}
-		backend.VerifyBackendConsistency(s.be, lg, false, schema.AllBuckets...)
 		if !s.isLeader() {
 			continue
 		}
@@ -2306,14 +2612,52 @@ func (s *EtcdServer) monitorCompactHash() {
 		select {
 		case <-time.After(t):
 		case <-s.stopping:
-			lg := s.Logger()
-			lg.Info("server has stopped; stopping compact hash's monitor")
 			return
 		}
 		if !s.isLeader() {
 			continue
 		}
 		s.corruptionChecker.CompactHashCheck()
+	}
+}
+
+func (s *EtcdServer) updateClusterVersionV2(ver string) {
+	lg := s.Logger()
+
+	if s.cluster.Version() == nil {
+		lg.Info(
+			"setting up initial cluster version using v2 API",
+			zap.String("cluster-version", version.Cluster(ver)),
+		)
+	} else {
+		lg.Info(
+			"updating cluster version using v2 API",
+			zap.String("from", version.Cluster(s.cluster.Version().String())),
+			zap.String("to", version.Cluster(ver)),
+		)
+	}
+
+	req := pb.Request{
+		Method: "PUT",
+		Path:   membership.StoreClusterVersionKey(),
+		Val:    ver,
+	}
+
+	ctx, cancel := context.WithTimeout(s.ctx, s.Cfg.ReqTimeout())
+	_, err := s.Do(ctx, req)
+	cancel()
+
+	switch err {
+	case nil:
+		lg.Info("cluster version is updated", zap.String("cluster-version", version.Cluster(ver)))
+		return
+
+	case ErrStopped:
+		lg.Warn("aborting cluster version update; server is stopped", zap.Error(err))
+		return
+
+	default:
+		lg.Warn("failed to update cluster version", zap.Error(err))
 	}
 }
 
@@ -2344,7 +2688,7 @@ func (s *EtcdServer) updateClusterVersionV3(ver string) {
 		lg.Info("cluster version is updated", zap.String("cluster-version", version.Cluster(ver)))
 		return
 
-	case errors.ErrStopped:
+	case ErrStopped:
 		lg.Warn("aborting cluster version update; server is stopped", zap.Error(err))
 		return
 
@@ -2353,13 +2697,12 @@ func (s *EtcdServer) updateClusterVersionV3(ver string) {
 	}
 }
 
-// monitorDowngrade every DowngradeCheckTime checks if it's the leader and cancels downgrade if needed.
 func (s *EtcdServer) monitorDowngrade() {
-	monitor := serverversion.NewMonitor(s.Logger(), NewServerVersionAdapter(s))
 	t := s.Cfg.DowngradeCheckTime
 	if t == 0 {
 		return
 	}
+	lg := s.Logger()
 	for {
 		select {
 		case <-time.After(t):
@@ -2370,14 +2713,29 @@ func (s *EtcdServer) monitorDowngrade() {
 		if !s.isLeader() {
 			continue
 		}
-		monitor.CancelDowngradeIfNeeded()
+
+		d := s.cluster.DowngradeInfo()
+		if !d.Enabled {
+			continue
+		}
+
+		targetVersion := d.TargetVersion
+		v := semver.Must(semver.NewVersion(targetVersion))
+		if isMatchedVersions(s.Logger(), v, getVersions(s.Logger(), s.cluster, s.id, s.peerRt)) {
+			lg.Info("the cluster has been downgraded", zap.String("cluster-version", targetVersion))
+			ctx, cancel := context.WithTimeout(context.Background(), s.Cfg.ReqTimeout())
+			if _, err := s.downgradeCancel(ctx); err != nil {
+				lg.Warn("failed to cancel downgrade", zap.Error(err))
+			}
+			cancel()
+		}
 	}
 }
 
 func (s *EtcdServer) parseProposeCtxErr(err error, start time.Time) error {
 	switch err {
 	case context.Canceled:
-		return errors.ErrCanceled
+		return ErrCanceled
 
 	case context.DeadlineExceeded:
 		s.leadTimeMu.RLock()
@@ -2385,22 +2743,22 @@ func (s *EtcdServer) parseProposeCtxErr(err error, start time.Time) error {
 		s.leadTimeMu.RUnlock()
 		prevLeadLost := curLeadElected.Add(-2 * time.Duration(s.Cfg.ElectionTicks) * time.Duration(s.Cfg.TickMs) * time.Millisecond)
 		if start.After(prevLeadLost) && start.Before(curLeadElected) {
-			return errors.ErrTimeoutDueToLeaderFail
+			return ErrTimeoutDueToLeaderFail
 		}
 		lead := types.ID(s.getLead())
 		switch lead {
 		case types.ID(raft.None):
 			// TODO: return error to specify it happens because the cluster does not have leader now
-		case s.MemberID():
-			if !isConnectedToQuorumSince(s.r.transport, start, s.MemberID(), s.cluster.Members()) {
-				return errors.ErrTimeoutDueToConnectionLost
+		case s.ID():
+			if !isConnectedToQuorumSince(s.r.transport, start, s.ID(), s.cluster.Members()) {
+				return ErrTimeoutDueToConnectionLost
 			}
 		default:
 			if !isConnectedSince(s.r.transport, start, lead) {
-				return errors.ErrTimeoutDueToConnectionLost
+				return ErrTimeoutDueToConnectionLost
 			}
 		}
-		return errors.ErrTimeout
+		return ErrTimeout
 
 	default:
 		return err
@@ -2409,19 +2767,26 @@ func (s *EtcdServer) parseProposeCtxErr(err error, start time.Time) error {
 
 func (s *EtcdServer) KV() mvcc.WatchableKV { return s.kv }
 func (s *EtcdServer) Backend() backend.Backend {
-	s.bemu.RLock()
-	defer s.bemu.RUnlock()
+	s.bemu.Lock()
+	defer s.bemu.Unlock()
 	return s.be
 }
 
 func (s *EtcdServer) AuthStore() auth.AuthStore { return s.authStore }
 
 func (s *EtcdServer) restoreAlarms() error {
-	as, err := v3alarm.NewAlarmStore(s.lg, schema.NewAlarmBackend(s.lg, s.be))
+	s.applyV3 = s.newApplierV3()
+	as, err := v3alarm.NewAlarmStore(s.lg, s)
 	if err != nil {
 		return err
 	}
 	s.alarmStore = as
+	if len(as.Get(pb.AlarmType_NOSPACE)) > 0 {
+		s.applyV3 = newApplierV3Capped(s.applyV3)
+	}
+	if len(as.Get(pb.AlarmType_CORRUPT)) > 0 {
+		s.applyV3 = newApplierV3Corrupt(s.applyV3)
+	}
 	return nil
 }
 
@@ -2466,10 +2831,6 @@ func (s *EtcdServer) raftStatus() raft.Status {
 	return s.r.Node.Status()
 }
 
-func (s *EtcdServer) Version() *serverversion.Manager {
-	return serverversion.NewManager(s.Logger(), NewServerVersionAdapter(s))
-}
-
 func (s *EtcdServer) getTxPostLockInsideApplyHook() func() {
 	return func() {
 		applyingIdx, applyingTerm := s.consistIndex.ConsistentApplyingIndex()
@@ -2477,6 +2838,25 @@ func (s *EtcdServer) getTxPostLockInsideApplyHook() func() {
 			s.consistIndex.SetConsistentIndex(applyingIdx, applyingTerm)
 		}
 	}
+}
+
+func maybeDefragBackend(cfg config.ServerConfig, be backend.Backend) error {
+	size := be.Size()
+	sizeInUse := be.SizeInUse()
+	freeableMemory := uint(size - sizeInUse)
+	thresholdBytes := cfg.ExperimentalBootstrapDefragThresholdMegabytes * 1024 * 1024
+	if freeableMemory < thresholdBytes {
+		cfg.Logger.Info("Skipping defragmentation",
+			zap.Int64("current-db-size-bytes", size),
+			zap.String("current-db-size", humanize.Bytes(uint64(size))),
+			zap.Int64("current-db-size-in-use-bytes", sizeInUse),
+			zap.String("current-db-size-in-use", humanize.Bytes(uint64(sizeInUse))),
+			zap.Uint("experimental-bootstrap-defrag-threshold-bytes", thresholdBytes),
+			zap.String("experimental-bootstrap-defrag-threshold", humanize.Bytes(uint64(thresholdBytes))),
+		)
+		return nil
+	}
+	return be.Defrag()
 }
 
 func (s *EtcdServer) CorruptionChecker() CorruptionChecker {

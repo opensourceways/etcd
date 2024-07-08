@@ -27,7 +27,6 @@ import (
 	_ "google.golang.org/grpc/health"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 )
 
@@ -44,9 +43,10 @@ const (
 
 func TestFailoverOnDefrag(t *testing.T) {
 	tcs := []struct {
-		name            string
-		clusterOptions  []e2e.EPClusterOption
-		gRPCDialOptions []grpc.DialOption
+		name string
+
+		experimentalStopGRPCServiceOnDefragEnabled bool
+		gRPCDialOptions                            []grpc.DialOption
 
 		// common assertion
 		expectedMinQPS float64
@@ -57,11 +57,7 @@ func TestFailoverOnDefrag(t *testing.T) {
 	}{
 		{
 			name: "defrag failover happy case",
-			clusterOptions: []e2e.EPClusterOption{
-				e2e.WithClusterSize(3),
-				e2e.WithExperimentalStopGRPCServiceOnDefrag(true),
-				e2e.WithGoFailEnabled(true),
-			},
+			experimentalStopGRPCServiceOnDefragEnabled: true,
 			gRPCDialOptions: []grpc.DialOption{
 				grpc.WithDisableServiceConfig(),
 				grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy": "round_robin", "healthCheckConfig": {"serviceName": ""}}`),
@@ -71,11 +67,7 @@ func TestFailoverOnDefrag(t *testing.T) {
 		},
 		{
 			name: "defrag blocks one-third of requests with stopGRPCServiceOnDefrag set to false",
-			clusterOptions: []e2e.EPClusterOption{
-				e2e.WithClusterSize(3),
-				e2e.WithExperimentalStopGRPCServiceOnDefrag(false),
-				e2e.WithGoFailEnabled(true),
-			},
+			experimentalStopGRPCServiceOnDefragEnabled: false,
 			gRPCDialOptions: []grpc.DialOption{
 				grpc.WithDisableServiceConfig(),
 				grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy": "round_robin", "healthCheckConfig": {"serviceName": ""}}`),
@@ -85,11 +77,7 @@ func TestFailoverOnDefrag(t *testing.T) {
 		},
 		{
 			name: "defrag blocks one-third of requests with stopGRPCServiceOnDefrag set to true and client health check disabled",
-			clusterOptions: []e2e.EPClusterOption{
-				e2e.WithClusterSize(3),
-				e2e.WithExperimentalStopGRPCServiceOnDefrag(true),
-				e2e.WithGoFailEnabled(true),
-			},
+			experimentalStopGRPCServiceOnDefragEnabled: true,
 			expectedMinQPS:         20,
 			expectedMinFailureRate: 0.25,
 		},
@@ -98,8 +86,13 @@ func TestFailoverOnDefrag(t *testing.T) {
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			e2e.BeforeTest(t)
-			clus, cerr := e2e.NewEtcdProcessCluster(context.TODO(), t, tc.clusterOptions...)
-			require.NoError(t, cerr)
+			cfg := e2e.EtcdProcessClusterConfig{
+				ClusterSize:                         3,
+				GoFailEnabled:                       true,
+				ExperimentalStopGRPCServiceOnDefrag: tc.experimentalStopGRPCServiceOnDefragEnabled,
+			}
+			clus, err := e2e.NewEtcdProcessCluster(t, &cfg)
+			require.NoError(t, err)
 			t.Cleanup(func() { clus.Stop() })
 
 			endpoints := clus.EndpointsGRPC()
@@ -138,13 +131,13 @@ func TestFailoverOnDefrag(t *testing.T) {
 					successfulRequestCount++
 				}
 			})
+
 			triggerDefrag(t, clus.Procs[0])
 
-			err := g.Wait()
+			err = g.Wait()
 			if err != nil {
 				t.Logf("etcd client failed to fail over, error (%v)", err)
 			}
-
 			qps := float64(requestVolume) / float64(time.Since(start)) * float64(time.Second)
 			failureRate := 1 - float64(successfulRequestCount)/float64(requestVolume)
 			t.Logf("request failure rate is %.2f%%, qps is %.2f requests/second", failureRate*100, qps)
@@ -162,5 +155,5 @@ func TestFailoverOnDefrag(t *testing.T) {
 
 func triggerDefrag(t *testing.T, member e2e.EtcdProcess) {
 	require.NoError(t, member.Failpoints().SetupHTTP(context.Background(), "defragBeforeCopy", `sleep("10s")`))
-	require.NoError(t, member.Etcdctl().Defragment(context.Background(), config.DefragOption{Timeout: time.Minute}))
+	require.NoError(t, member.Etcdctl(e2e.ClientNonTLS, false, false).Defragment(time.Minute))
 }

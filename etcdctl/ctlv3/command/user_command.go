@@ -21,8 +21,7 @@ import (
 
 	"github.com/bgentry/speakeasy"
 	"github.com/spf13/cobra"
-
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 )
 
@@ -200,7 +199,7 @@ func userGetCommandFunc(cmd *cobra.Command, args []string) {
 	if userShowDetail {
 		fmt.Printf("User: %s\n", name)
 		for _, role := range resp.Roles {
-			fmt.Print("\n")
+			fmt.Printf("\n")
 			roleResp, err := client.Auth.RoleGet(context.TODO(), role)
 			if err != nil {
 				cobrautl.ExitWithError(cobrautl.ExitError, err)

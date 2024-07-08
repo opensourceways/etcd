@@ -18,9 +18,8 @@ import (
 	"context"
 	"errors"
 
-	"google.golang.org/grpc"
-
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"google.golang.org/grpc"
 )
 
 var errAlreadySentHeader = errors.New("adapter: already sent header")
@@ -48,7 +47,7 @@ func (s *ws2wcClientStream) Send(wr *pb.WatchRequest) error {
 	return s.SendMsg(wr)
 }
 func (s *ws2wcClientStream) Recv() (*pb.WatchResponse, error) {
-	var v any
+	var v interface{}
 	if err := s.RecvMsg(&v); err != nil {
 		return nil, err
 	}
@@ -59,7 +58,7 @@ func (s *ws2wcServerStream) Send(wr *pb.WatchResponse) error {
 	return s.SendMsg(wr)
 }
 func (s *ws2wcServerStream) Recv() (*pb.WatchRequest, error) {
-	var v any
+	var v interface{}
 	if err := s.RecvMsg(&v); err != nil {
 		return nil, err
 	}

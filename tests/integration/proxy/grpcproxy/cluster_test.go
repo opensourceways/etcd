@@ -21,26 +21,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
-	"google.golang.org/grpc"
-
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/naming/endpoints"
 	"go.etcd.io/etcd/server/v3/proxy/grpcproxy"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
+	"go.etcd.io/etcd/tests/v3/integration"
+	"go.uber.org/zap/zaptest"
+
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 func TestClusterProxyMemberList(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	lg := zaptest.NewLogger(t)
-	serverEps := []string{clus.Members[0].GRPCURL}
+	serverEps := []string{clus.Members[0].GRPCURL()}
 	prefix := "test-prefix"
 	hostname, _ := os.Hostname()
 	cts := newClusterProxyServer(lg, serverEps, prefix, t)
@@ -50,7 +50,7 @@ func TestClusterProxyMemberList(t *testing.T) {
 		Endpoints:   []string{cts.caddr},
 		DialTimeout: 5 * time.Second,
 	}
-	client, err := integration2.NewClient(t, cfg)
+	client, err := integration.NewClient(t, cfg)
 	if err != nil {
 		t.Fatalf("err %v, want nil", err)
 	}
@@ -131,7 +131,7 @@ func newClusterProxyServer(lg *zap.Logger, endpoints []string, prefix string, t 
 		Endpoints:   endpoints,
 		DialTimeout: 5 * time.Second,
 	}
-	client, err := integration2.NewClient(t, cfg)
+	client, err := integration.NewClient(t, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

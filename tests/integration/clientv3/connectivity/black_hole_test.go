@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //go:build !cluster_proxy
+// +build !cluster_proxy
 
 package connectivity_test
 
@@ -21,28 +22,27 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
-
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
-	clientv3test "go.etcd.io/etcd/tests/v3/integration/clientv3"
+	"go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/tests/v3/integration"
+	"go.etcd.io/etcd/tests/v3/integration/clientv3"
+	"google.golang.org/grpc"
 )
 
 // TestBalancerUnderBlackholeKeepAliveWatch tests when watch discovers it cannot talk to
 // blackholed endpoint, client balancer switches to healthy one.
 // TODO: test server-to-client keepalive ping
 func TestBalancerUnderBlackholeKeepAliveWatch(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{
 		Size:                 2,
 		GRPCKeepAliveMinTime: time.Millisecond, // avoid too_many_pings
 		UseBridge:            true,
 	})
 	defer clus.Terminate(t)
 
-	eps := []string{clus.Members[0].GRPCURL, clus.Members[1].GRPCURL}
+	eps := []string{clus.Members[0].GRPCURL(), clus.Members[1].GRPCURL()}
 
 	ccfg := clientv3.Config{
 		Endpoints:            []string{eps[0]},
@@ -58,9 +58,9 @@ func TestBalancerUnderBlackholeKeepAliveWatch(t *testing.T) {
 	// TODO: only send healthy endpoint to gRPC so gRPC wont waste time to
 	// dial for unhealthy endpoint.
 	// then we can reduce 3s to 1s.
-	timeout := pingInterval + integration2.RequestWaitTimeout
+	timeout := pingInterval + integration.RequestWaitTimeout
 
-	cli, err := integration2.NewClient(t, ccfg)
+	cli, err := integration.NewClient(t, ccfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,22 +166,23 @@ func TestBalancerUnderBlackholeNoKeepAliveSerializableGet(t *testing.T) {
 // testBalancerUnderBlackholeNoKeepAlive ensures that first request to blackholed endpoint
 // fails due to context timeout, but succeeds on next try, with endpoint switch.
 func testBalancerUnderBlackholeNoKeepAlive(t *testing.T, op func(*clientv3.Client, context.Context) error) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{
-		Size:      2,
-		UseBridge: true,
+	clus := integration.NewClusterV3(t, &integration.ClusterConfig{
+		Size:               2,
+		SkipCreatingClient: true,
+		UseBridge:          true,
 	})
 	defer clus.Terminate(t)
 
-	eps := []string{clus.Members[0].GRPCURL, clus.Members[1].GRPCURL}
+	eps := []string{clus.Members[0].GRPCURL(), clus.Members[1].GRPCURL()}
 
 	ccfg := clientv3.Config{
 		Endpoints:   []string{eps[0]},
 		DialTimeout: 1 * time.Second,
 		DialOptions: []grpc.DialOption{grpc.WithBlock()},
 	}
-	cli, err := integration2.NewClient(t, ccfg)
+	cli, err := integration.NewClient(t, ccfg)
 	if err != nil {
 		t.Fatal(err)
 	}

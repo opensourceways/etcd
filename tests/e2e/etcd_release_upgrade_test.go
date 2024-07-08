@@ -15,32 +15,33 @@
 package e2e
 
 import (
-	"context"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
-	"go.etcd.io/etcd/pkg/v3/expect"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 )
 
 // TestReleaseUpgrade ensures that changes to master branch does not affect
 // upgrade from latest etcd releases.
 func TestReleaseUpgrade(t *testing.T) {
-	if !fileutil.Exist(e2e.BinPath.EtcdLastRelease) {
-		t.Skipf("%q does not exist", e2e.BinPath.EtcdLastRelease)
+	lastReleaseBinary := e2e.BinDir + "/etcd-last-release"
+	if !fileutil.Exist(lastReleaseBinary) {
+		t.Skipf("%q does not exist", lastReleaseBinary)
 	}
 
 	e2e.BeforeTest(t)
 
-	epc, err := e2e.NewEtcdProcessCluster(context.TODO(), t,
-		e2e.WithVersion(e2e.LastVersion),
-		e2e.WithSnapshotCount(3),
-		e2e.WithBasePeerScheme("unix"), // to avoid port conflict
-	)
+	copiedCfg := e2e.NewConfigNoTLS()
+	copiedCfg.Version = e2e.LastVersion
+	copiedCfg.SnapshotCount = 3
+	copiedCfg.BasePeerScheme = "unix" // to avoid port conflict
+
+	epc, err := e2e.NewEtcdProcessCluster(t, copiedCfg)
 	if err != nil {
 		t.Fatalf("could not start etcd process cluster (%v)", err)
 	}
@@ -50,6 +51,8 @@ func TestReleaseUpgrade(t *testing.T) {
 		}
 	}()
 
+	os.Setenv("ETCDCTL_API", "3")
+	defer os.Unsetenv("ETCDCTL_API")
 	cx := ctlCtx{
 		t:           t,
 		cfg:         *e2e.NewConfigNoTLS(),
@@ -62,7 +65,7 @@ func TestReleaseUpgrade(t *testing.T) {
 		kvs = append(kvs, kv{key: fmt.Sprintf("foo%d", i), val: "bar"})
 	}
 	for i := range kvs {
-		if err = ctlV3Put(cx, kvs[i].key, kvs[i].val, ""); err != nil {
+		if err := ctlV3Put(cx, kvs[i].key, kvs[i].val, ""); err != nil {
 			cx.t.Fatalf("#%d: ctlV3Put error (%v)", i, err)
 		}
 	}
@@ -71,21 +74,21 @@ func TestReleaseUpgrade(t *testing.T) {
 
 	for i := range epc.Procs {
 		t.Logf("Stopping node: %v", i)
-		if err = epc.Procs[i].Stop(); err != nil {
+		if err := epc.Procs[i].Stop(); err != nil {
 			t.Fatalf("#%d: error closing etcd process (%v)", i, err)
 		}
 		t.Logf("Stopped node: %v", i)
-		epc.Procs[i].Config().ExecPath = e2e.BinPath.Etcd
+		epc.Procs[i].Config().ExecPath = e2e.BinPath
 		epc.Procs[i].Config().KeepDataDir = true
 
 		t.Logf("Restarting node in the new version: %v", i)
-		if err = epc.Procs[i].Restart(context.TODO()); err != nil {
+		if err := epc.Procs[i].Restart(); err != nil {
 			t.Fatalf("error restarting etcd process (%v)", err)
 		}
 
 		t.Logf("Testing reads after node restarts: %v", i)
 		for j := range kvs {
-			if err = ctlV3Get(cx, []string{kvs[j].key}, []kv{kvs[j]}...); err != nil {
+			if err := ctlV3Get(cx, []string{kvs[j].key}, []kv{kvs[j]}...); err != nil {
 				cx.t.Fatalf("#%d-%d: ctlV3Get error (%v)", i, j, err)
 			}
 		}
@@ -98,7 +101,7 @@ func TestReleaseUpgrade(t *testing.T) {
 	// new cluster version needs more time to upgrade
 	ver := version.Cluster(version.Version)
 	for i := 0; i < 7; i++ {
-		if err = e2e.CURLGet(epc, e2e.CURLReq{Endpoint: "/version", Expected: expect.ExpectedResponse{Value: `"etcdcluster":"` + ver}}); err != nil {
+		if err = e2e.CURLGet(epc, e2e.CURLReq{Endpoint: "/version", Expected: `"etcdcluster":"` + ver}); err != nil {
 			t.Logf("#%d: %v is not ready yet (%v)", i, ver, err)
 			time.Sleep(time.Second)
 			continue
@@ -112,18 +115,19 @@ func TestReleaseUpgrade(t *testing.T) {
 }
 
 func TestReleaseUpgradeWithRestart(t *testing.T) {
-	if !fileutil.Exist(e2e.BinPath.EtcdLastRelease) {
-		t.Skipf("%q does not exist", e2e.BinPath.EtcdLastRelease)
+	lastReleaseBinary := e2e.BinDir + "/etcd-last-release"
+	if !fileutil.Exist(lastReleaseBinary) {
+		t.Skipf("%q does not exist", lastReleaseBinary)
 	}
 
 	e2e.BeforeTest(t)
 
-	epc, err := e2e.NewEtcdProcessCluster(context.TODO(), t,
-		e2e.WithVersion(e2e.LastVersion),
-		e2e.WithSnapshotCount(10),
-		e2e.WithBasePeerScheme("unix"),
-	)
+	copiedCfg := e2e.NewConfigNoTLS()
+	copiedCfg.Version = e2e.LastVersion
+	copiedCfg.SnapshotCount = 10
+	copiedCfg.BasePeerScheme = "unix"
 
+	epc, err := e2e.NewEtcdProcessCluster(t, copiedCfg)
 	if err != nil {
 		t.Fatalf("could not start etcd process cluster (%v)", err)
 	}
@@ -133,6 +137,8 @@ func TestReleaseUpgradeWithRestart(t *testing.T) {
 		}
 	}()
 
+	os.Setenv("ETCDCTL_API", "3")
+	defer os.Unsetenv("ETCDCTL_API")
 	cx := ctlCtx{
 		t:           t,
 		cfg:         *e2e.NewConfigNoTLS(),
@@ -160,9 +166,9 @@ func TestReleaseUpgradeWithRestart(t *testing.T) {
 	wg.Add(len(epc.Procs))
 	for i := range epc.Procs {
 		go func(i int) {
-			epc.Procs[i].Config().ExecPath = e2e.BinPath.Etcd
+			epc.Procs[i].Config().ExecPath = e2e.BinPath
 			epc.Procs[i].Config().KeepDataDir = true
-			if err := epc.Procs[i].Restart(context.TODO()); err != nil {
+			if err := epc.Procs[i].Restart(); err != nil {
 				t.Errorf("error restarting etcd process (%v)", err)
 			}
 			wg.Done()

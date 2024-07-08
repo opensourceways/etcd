@@ -17,15 +17,16 @@ package clientv3_test
 import (
 	"context"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"strings"
 
+	"go.etcd.io/etcd/client/v3"
+
 	grpcprom "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 )
 
@@ -71,7 +72,7 @@ func ExampleClient_metrics() {
 		if err != nil {
 			log.Fatalf("fetch error: %v", err)
 		}
-		b, err := io.ReadAll(resp.Body)
+		b, err := ioutil.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			log.Fatalf("fetch error: reading %s: %v", url, err)

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //go:build !windows
+// +build !windows
 
 package embed
 
@@ -20,9 +21,9 @@ import (
 	"fmt"
 	"os"
 
-	"go.uber.org/zap/zapcore"
-
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
+
+	"go.uber.org/zap/zapcore"
 )
 
 // use stderr as fallback

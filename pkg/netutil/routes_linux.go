@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //go:build linux
+// +build linux
 
 package netutil
 
@@ -21,7 +22,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
-	"slices"
+	"sort"
 	"syscall"
 
 	"go.etcd.io/etcd/pkg/v3/cpuutil"
@@ -48,13 +49,14 @@ func GetDefaultHost() (string, error) {
 	}
 
 	// sort so choice is deterministic
-	var families []uint8
+	var families []int
 	for family := range rmsgs {
-		families = append(families, family)
+		families = append(families, int(family))
 	}
-	slices.Sort(families)
+	sort.Ints(families)
 
-	for _, family := range families {
+	for _, f := range families {
+		family := uint8(f)
 		if host, err := chooseHost(family, rmsgs[family]); host != "" || err != nil {
 			return host, err
 		}

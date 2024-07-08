@@ -15,22 +15,15 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/json"
-	"encoding/pem"
 	"fmt"
-	"math/big"
-	"net"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
+	clientv2 "go.etcd.io/etcd/client/v2"
+	"go.etcd.io/etcd/tests/v3/framework/e2e"
+	"go.etcd.io/etcd/tests/v3/integration"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
@@ -38,12 +31,10 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/stringutil"
-	"go.etcd.io/etcd/tests/v3/framework/e2e"
-	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
-func newClient(t *testing.T, entpoints []string, cfg e2e.ClientConfig) *clientv3.Client {
-	tlscfg, err := tlsInfo(t, cfg)
+func newClient(t *testing.T, entpoints []string, connType e2e.ClientConnType, isAutoTLS bool) *clientv3.Client {
+	tlscfg, err := tlsInfo(t, connType, isAutoTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,10 +44,11 @@ func newClient(t *testing.T, entpoints []string, cfg e2e.ClientConfig) *clientv3
 		DialOptions: []grpc.DialOption{grpc.WithBlock()},
 	}
 	if tlscfg != nil {
-		ccfg.TLS, err = tlscfg.ClientConfig()
+		tls, err := tlscfg.ClientConfig()
 		if err != nil {
 			t.Fatal(err)
 		}
+		ccfg.TLS = tls
 	}
 	c, err := clientv3.New(ccfg)
 	if err != nil {
@@ -68,13 +60,29 @@ func newClient(t *testing.T, entpoints []string, cfg e2e.ClientConfig) *clientv3
 	return c
 }
 
-// tlsInfo follows the Client-to-server communication in https://etcd.io/docs/v3.6/op-guide/security/#basic-setup
-func tlsInfo(t testing.TB, cfg e2e.ClientConfig) (*transport.TLSInfo, error) {
-	switch cfg.ConnectionType {
+func newClientV2(t *testing.T, endpoints []string, connType e2e.ClientConnType, isAutoTLS bool) (clientv2.Client, error) {
+	tls, err := tlsInfo(t, connType, isAutoTLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := clientv2.Config{
+		Endpoints: endpoints,
+	}
+	if tls != nil {
+		cfg.Transport, err = transport.NewTransport(*tls, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return clientv2.New(cfg)
+}
+
+func tlsInfo(t testing.TB, connType e2e.ClientConnType, isAutoTLS bool) (*transport.TLSInfo, error) {
+	switch connType {
 	case e2e.ClientNonTLS, e2e.ClientTLSAndNonTLS:
 		return nil, nil
 	case e2e.ClientTLS:
-		if cfg.AutoTLS {
+		if isAutoTLS {
 			tls, err := transport.SelfCert(zap.NewNop(), t.TempDir(), []string{"localhost"}, 1)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate cert: %s", err)
@@ -83,7 +91,7 @@ func tlsInfo(t testing.TB, cfg e2e.ClientConfig) (*transport.TLSInfo, error) {
 		}
 		return &integration.TestTLSInfo, nil
 	default:
-		return nil, fmt.Errorf("config %v not supported", cfg)
+		return nil, fmt.Errorf("config %v not supported", connType)
 	}
 }
 
@@ -108,32 +116,8 @@ func fillEtcdWithData(ctx context.Context, c *clientv3.Client, dbSize int) error
 	return g.Wait()
 }
 
-func curl(endpoint string, method string, curlReq e2e.CURLReq, connType e2e.ClientConnType) (string, error) {
-	args := e2e.CURLPrefixArgs(endpoint, e2e.ClientConfig{ConnectionType: connType}, false, method, curlReq)
-	lines, err := e2e.RunUtilCompletion(args, nil)
-	if err != nil {
-		return "", err
-	}
-	return strings.Join(lines, "\n"), nil
-}
-
-func runCommandAndReadJSONOutput(args []string) (map[string]any, error) {
-	lines, err := e2e.RunUtilCompletion(args, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp map[string]any
-	err = json.Unmarshal([]byte(strings.Join(lines, "\n")), &resp)
-	if err != nil {
-		return nil, err
-	}
-
-	return resp, nil
-}
-
-func getMemberIDByName(ctx context.Context, c *e2e.EtcdctlV3, name string) (id uint64, found bool, err error) {
-	resp, err := c.MemberList(ctx, false)
+func getMemberIdByName(ctx context.Context, c *e2e.Etcdctl, name string) (id uint64, found bool, err error) {
+	resp, err := c.MemberList()
 	if err != nil {
 		return 0, false, err
 	}
@@ -145,129 +129,15 @@ func getMemberIDByName(ctx context.Context, c *e2e.EtcdctlV3, name string) (id u
 	return 0, false, nil
 }
 
-func patchArgs(args []string, flag, newValue string) error {
+// Different implementations here since 3.5 e2e test framework does not have "initial-cluster-state" as a default argument
+// Append new flag if not exist, otherwise replace the value
+func patchArgs(args []string, flag, newValue string) []string {
 	for i, arg := range args {
 		if strings.Contains(arg, flag) {
 			args[i] = fmt.Sprintf("--%s=%s", flag, newValue)
-			return nil
+			return args
 		}
 	}
-	return fmt.Errorf("--%s flag not found", flag)
-}
-
-func generateCertsForIPs(tempDir string, ips []net.IP) (caFile string, certFiles []string, keyFiles []string, err error) {
-	ca := &x509.Certificate{
-		SerialNumber: big.NewInt(1001),
-		Subject: pkix.Name{
-			Organization:       []string{"etcd"},
-			OrganizationalUnit: []string{"etcd Security"},
-			Locality:           []string{"San Francisco"},
-			Province:           []string{"California"},
-			Country:            []string{"USA"},
-		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().AddDate(0, 0, 1),
-		IsCA:                  true,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		BasicConstraintsValid: true,
-	}
-
-	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return "", nil, nil, err
-	}
-	caBytes, err := x509.CreateCertificate(rand.Reader, ca, ca, &caKey.PublicKey, caKey)
-	if err != nil {
-		return "", nil, nil, err
-	}
-
-	caFile, _, err = saveCertToFile(tempDir, caBytes, nil)
-	if err != nil {
-		return "", nil, nil, err
-	}
-
-	for i, ip := range ips {
-		cert := &x509.Certificate{
-			SerialNumber: big.NewInt(1001 + int64(i)),
-			Subject: pkix.Name{
-				Organization:       []string{"etcd"},
-				OrganizationalUnit: []string{"etcd Security"},
-				Locality:           []string{"San Francisco"},
-				Province:           []string{"California"},
-				Country:            []string{"USA"},
-			},
-			IPAddresses:  []net.IP{ip},
-			NotBefore:    time.Now(),
-			NotAfter:     time.Now().AddDate(0, 0, 1),
-			SubjectKeyId: []byte{1, 2, 3, 4, 5},
-			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
-			KeyUsage:     x509.KeyUsageDigitalSignature,
-		}
-		certKey, err := rsa.GenerateKey(rand.Reader, 2048)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		certBytes, err := x509.CreateCertificate(rand.Reader, cert, ca, &certKey.PublicKey, caKey)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		certFile, keyFile, err := saveCertToFile(tempDir, certBytes, certKey)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		certFiles = append(certFiles, certFile)
-		keyFiles = append(keyFiles, keyFile)
-	}
-
-	return caFile, certFiles, keyFiles, nil
-}
-
-func saveCertToFile(tempDir string, certBytes []byte, key *rsa.PrivateKey) (certFile string, keyFile string, err error) {
-	certPEM := new(bytes.Buffer)
-	pem.Encode(certPEM, &pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: certBytes,
-	})
-	cf, err := os.CreateTemp(tempDir, "*.crt")
-	if err != nil {
-		return "", "", err
-	}
-	defer cf.Close()
-	if _, err := cf.Write(certPEM.Bytes()); err != nil {
-		return "", "", err
-	}
-
-	if key != nil {
-		certKeyPEM := new(bytes.Buffer)
-		pem.Encode(certKeyPEM, &pem.Block{
-			Type:  "RSA PRIVATE KEY",
-			Bytes: x509.MarshalPKCS1PrivateKey(key),
-		})
-
-		kf, err := os.CreateTemp(tempDir, "*.key.insecure")
-		if err != nil {
-			return "", "", err
-		}
-		defer kf.Close()
-		if _, err := kf.Write(certKeyPEM.Bytes()); err != nil {
-			return "", "", err
-		}
-
-		return cf.Name(), kf.Name(), nil
-	}
-
-	return cf.Name(), "", nil
-}
-
-func getLocalIP() (string, error) {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-
-	localAddress := conn.LocalAddr().(*net.UDPAddr)
-
-	return localAddress.IP.String(), nil
+	args = append(args, fmt.Sprintf("--%s=%s", flag, newValue))
+	return args
 }

@@ -22,10 +22,11 @@ import (
 )
 
 func TestValidateSecureEndpoints(t *testing.T) {
-	tlsInfo, err := createSelfCert(t)
+	tlsInfo, certCleanup, err := createSelfCert()
 	if err != nil {
 		t.Fatalf("unable to create cert: %v", err)
 	}
+	defer certCleanup()
 
 	remoteAddr := func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(r.RemoteAddr))
