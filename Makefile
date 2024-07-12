@@ -22,7 +22,7 @@ XARGS += rm -r
 
 .PHONY: build
 build:
-	GO_BUILD_FLAGS="-v" ./build.sh
+	GO_BUILD_FLAGS="-v" GO_LDFLAGS="-w -s -linkmode external -extldflags '-Wl,-z,now'" ./build.sh
 	./bin/etcd --version
 	./bin/etcdctl version
 	./bin/etcdutl version

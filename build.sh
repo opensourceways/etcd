@@ -18,7 +18,7 @@ GOARCH=${GOARCH:-$(go env GOARCH)}
 CGO_ENABLED="${CGO_ENABLED:-0}"
 
 # Set GO_LDFLAGS="-s" for building without symbols for debugging.
-# shellcheck disable=SC2206
+# shellcheck disable=SC2206 
 GO_LDFLAGS=(${GO_LDFLAGS:-} "-X=${VERSION_SYMBOL}=${GIT_SHA}")
 GO_BUILD_ENV=("CGO_ENABLED=${CGO_ENABLED}" "GO_BUILD_FLAGS=${GO_BUILD_FLAGS:-}" "GOOS=${GOOS}" "GOARCH=${GOARCH}")
 
@@ -67,6 +67,7 @@ etcd_build() {
     # shellcheck disable=SC2086
     run env "${GO_BUILD_ENV[@]}" go build ${GO_BUILD_FLAGS:-} \
       -trimpath \
+      -buildmode=pie \
       -installsuffix=cgo \
       "-ldflags=${GO_LDFLAGS[*]}" \
       -o="../${out}/etcd" . || return 2
@@ -78,6 +79,7 @@ etcd_build() {
     cd ./etcdutl
     run env GO_BUILD_FLAGS="${GO_BUILD_FLAGS:-}" "${GO_BUILD_ENV[@]}" go build ${GO_BUILD_FLAGS:-} \
       -trimpath \
+      -buildmode=pie \
       -installsuffix=cgo \
       "-ldflags=${GO_LDFLAGS[*]}" \
       -o="../${out}/etcdutl" . || return 2
@@ -89,6 +91,7 @@ etcd_build() {
     cd ./etcdctl
     run env GO_BUILD_FLAGS="${GO_BUILD_FLAGS:-}" "${GO_BUILD_ENV[@]}" go build ${GO_BUILD_FLAGS:-} \
       -trimpath \
+      -buildmode=pie \
       -installsuffix=cgo \
       "-ldflags=${GO_LDFLAGS[*]}" \
       -o="../${out}/etcdctl" . || return 2
@@ -120,6 +123,7 @@ tools_build() {
     # shellcheck disable=SC2086
     run env GO_BUILD_FLAGS="${GO_BUILD_FLAGS:-}" CGO_ENABLED=${CGO_ENABLED} go build ${GO_BUILD_FLAGS:-} \
       -trimpath \
+      -buildmode=pie \
       -installsuffix=cgo \
       "-ldflags=${GO_LDFLAGS[*]}" \
       -o="${out}/${tool}" "./${tool}" || return 2
@@ -143,6 +147,7 @@ tests_build() {
 
       # shellcheck disable=SC2086
       run env CGO_ENABLED=${CGO_ENABLED} GO_BUILD_FLAGS="${GO_BUILD_FLAGS:-}" go build ${GO_BUILD_FLAGS:-} \
+        -buildmode=pie \
         -installsuffix=cgo \
         "-ldflags=${GO_LDFLAGS[*]}" \
         -o="../${out}/${tool}" "./${tool}" || return 2
